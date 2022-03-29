@@ -99,6 +99,12 @@ def register_ROIs(templateFOV, FOVs, ROIs, return_sparse=False, normalize=True):
     template_norm = np.uint8(templateFOV * (templateFOV > 0) * (1/templateFOV.max()) * 255)
     FOVs_norm    = [np.uint8(FOVs[ii] * (FOVs[ii] > 0) * (1/FOVs[ii].max()) * 255) for ii in range(len(FOVs))]
 
+    def safe_ROI_remap(img_ROI, x_remap, y_remap):
+        img_ROI_remap = cv2.remap(img_ROI.astype(np.float32), x_remap, y_remap, cv2.INTER_LINEAR)
+        if img_ROI_remap.sum() == 0:
+            img_ROI_remap = img_ROI
+        return img_ROI_remap
+
     
     ROIs_aligned, FOVs_aligned, flows = [], [], []
     for ii in range(len(FOVs)):
@@ -126,7 +132,7 @@ def register_ROIs(templateFOV, FOVs, ROIs, return_sparse=False, normalize=True):
         x_remap = (flow[:, :, 0] + x_grid).astype(np.float32)
         y_remap = (flow[:, :, 1] + y_grid).astype(np.float32)
 
-        ROI_aligned = np.stack([cv2.remap(img.astype(np.float32), x_remap, y_remap, cv2.INTER_NEAREST) for img in ROIs[ii]], axis=0)
+        ROI_aligned = np.stack([safe_ROI_remap(img.astype(np.float32), x_remap, y_remap) for img in ROIs[ii]], axis=0)
 #         ROI_aligned = np.stack([img.astype(np.float32) for img in ROIs[ii]], axis=0)
         FOV_aligned = cv2.remap(FOVs_norm[ii], x_remap, y_remap, cv2.INTER_NEAREST)
 
