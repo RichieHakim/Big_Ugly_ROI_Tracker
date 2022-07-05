@@ -647,7 +647,7 @@ def run_clustering_sweep(block_rois_raw, dbscan_objs, idx_roi_session):
 
 def reshape_into_sparse(arr, idx, shape):
     idx = [t.reshape(-1) for t in np.meshgrid(idx, idx)]
-    sp = scipy.sparse.csr_matrix((arr.reshape(-1), idx), shape=shape)
+    sp = scipy.sparse.csr_matrix((arr.reshape(1,-1), idx), shape=shape)
     return sp
 ## combine distances matrices into big distance matrix
 def combine_distances_from_blocks(block_rois, n_roi_all):
