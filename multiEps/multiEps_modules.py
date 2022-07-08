@@ -509,14 +509,15 @@ def embed_ROIs(
     tsne.n_neighbors = n_neighbors
     tsne.perplexity = min(max_perplexity, distances_toUse.shape[0]//4)
     # print(tsne.perplexity)
+    
 #     if pref_use_GPU:
 #         embeddings = tsne.fit_transform(
 #             X=sf_block_flat_scaled,
 #             knn_graph=distances_toUse
 #         )
 #     else:
-    if tsne.method == 'exact':
-        distances_toUse = toDense_fill(distances_toUse, 1)
+    # if tsne.method == 'exact':
+    distances_toUse = toDense_fill(distances_toUse, 1)
         
     embeddings = tsne.fit_transform(
         X=distances_toUse,
@@ -614,47 +615,99 @@ def display_clustering_widget(
     interact(update, eps=widgets.IntSlider(min=np.sqrt(min_slider)*200, max=np.sqrt(max_slider)*200, step=1, value=np.sqrt(start_slider)*200));
 
 
-def run_clustering_sweep(block_rois_raw, dbscan_objs, idx_roi_session):
+# def run_clustering_sweep(block_rois_raw, dbscan_objs, idx_roi_session):
+#     def is_unique(vals):
+#         is_unique = len(vals) == len(np.unique(vals))
+#         return is_unique
+#     def freq_of_values(vals):
+#         u = np.unique(vals)
+#         f = np.array([np.sum(vals==unique) for unique in u])
+#         return np.array([f[u==val][0] for val in vals])
+
+#     block_rois_multiEps = [copy.deepcopy(block) for block in block_rois_raw*len(dbscan_objs)] 
+
+#     n_bse = n_blocks_single_eps = len(block_rois_raw)
+#     for jj, dbscan in enumerate(tqdm(dbscan_objs)):
+#         for ii, block in enumerate(block_rois_raw):
+#             ## DBSCAN
+#             db = copy.deepcopy(dbscan)
+#             db.fit(block['embeddings']) # note that db.labels_==-1 means no cluster found
+#             db.labels_[freq_of_values(db.labels_) < dbscan.min_samples] = -1 # fail safe because sometimes there are clusters of just 1 for some reason...
+
+#             labels_unique = np.unique(db.labels_)
+#             idxCat_ROI_inOuterBlock = block_rois_multiEps[jj*n_bse + ii]['idxCat_ROI_inOuterBlock']
+
+#             block_rois_multiEps[jj*n_bse + ii]['db'] = db
+#             block_rois_multiEps[jj*n_bse + ii]['labels_unique'] = labels_unique
+#             block_rois_multiEps[jj*n_bse + ii]['cluster_sessions'] = [idx_roi_session[idxCat_ROI_inOuterBlock[db.labels_==label]] for label in labels_unique] # list of sessions a unique label derives from. Shape: [n_unique_labels][num of sessions where label is found]
+#             block_rois_multiEps[jj*n_bse + ii]['cluster_sessions_isUnique'] = np.array([is_unique(sessions) for sessions in block_rois_multiEps[jj*n_bse + ii]['cluster_sessions']]) # boolean. Shape (n_labels_unique). Value whether all the labels derive from unique sessions.    
+#             block_rois_multiEps[jj*n_bse + ii]['sizes_clusters'] = [(db.labels_==cid).sum() for cid in labels_unique]
+
+#     return block_rois_multiEps
+
+def run_clustering_sweep(block_rois_raw, cDBSCAN_class, idx_roi_session, min_samples=2):
     def is_unique(vals):
-        is_unique = len(vals) == len(np.unique(vals))
-        return is_unique
+        return len(vals) == len(np.unique(vals))
     def freq_of_values(vals):
         u = np.unique(vals)
         f = np.array([np.sum(vals==unique) for unique in u])
         return np.array([f[u==val][0] for val in vals])
 
-    block_rois_multiEps = [copy.deepcopy(block) for block in block_rois_raw*len(dbscan_objs)] 
+    block_rois_out = copy.deepcopy(block_rois_raw)
 
-    n_bse = n_blocks_single_eps = len(block_rois_raw)
-    for jj, dbscan in enumerate(tqdm(dbscan_objs)):
-        for ii, block in enumerate(block_rois_raw):
-            ## DBSCAN
-            db = copy.deepcopy(dbscan)
-            db.fit(block['embeddings']) # note that db.labels_==-1 means no cluster found
-            db.labels_[freq_of_values(db.labels_) < dbscan.min_samples] = -1 # fail safe because sometimes there are clusters of just 1 for some reason...
+    for ii, block in enumerate(tqdm(block_rois_raw)):
+        clusters_idx_unique, clusters_idx_unique_freq = cDBSCAN_class.fit(block['embeddings'])
 
-            labels_unique = np.unique(db.labels_)
-            idxCat_ROI_inOuterBlock = block_rois_multiEps[jj*n_bse + ii]['idxCat_ROI_inOuterBlock']
+        sizes_clusters_raw = np.array([len(idx) for idx in clusters_idx_unique], dtype=np.int64)
+        # print(clusters_idx_unique)
+        idx_tooSmall = np.where(sizes_clusters_raw < min_samples)[0]
 
-            block_rois_multiEps[jj*n_bse + ii]['db'] = db
-            block_rois_multiEps[jj*n_bse + ii]['labels_unique'] = labels_unique
-            block_rois_multiEps[jj*n_bse + ii]['cluster_sessions'] = [idx_roi_session[idxCat_ROI_inOuterBlock[db.labels_==label]] for label in labels_unique] # list of sessions a unique label derives from. Shape: [n_unique_labels][num of sessions where label is found]
-            block_rois_multiEps[jj*n_bse + ii]['cluster_sessions_isUnique'] = np.array([is_unique(sessions) for sessions in block_rois_multiEps[jj*n_bse + ii]['cluster_sessions']]) # boolean. Shape (n_labels_unique). Value whether all the labels derive from unique sessions.    
-            block_rois_multiEps[jj*n_bse + ii]['sizes_clusters'] = [(db.labels_==cid).sum() for cid in labels_unique]
+        ## remove clusters with too few samples
+        clusters_idx_unique = np.delete(clusters_idx_unique, idx_tooSmall)
+        clusters_idx_unique_freq = np.delete(clusters_idx_unique_freq, idx_tooSmall)
 
-    return block_rois_multiEps
+        sizes_clusters = np.array([len(idx) for idx in clusters_idx_unique], dtype=np.int64)
+        block_rois_out[ii]['clusters_idx_unique'] = [block['idxCat_ROI_inOuterBlock'][idx] for idx in clusters_idx_unique]
+        block_rois_out[ii]['clusters_idx_unique_freq'] = clusters_idx_unique_freq
+        block_rois_out[ii]['cluster_sessions'] = [idx_roi_session[idx] for idx in block_rois_out[ii]['clusters_idx_unique']]
+        block_rois_out[ii]['sizes_clusters'] = sizes_clusters
+        block_rois_out[ii]['cluster_sessions_isUnique'] = [is_unique(sessions) for sessions in block_rois_out[ii]['cluster_sessions']]
+
+    return block_rois_out
+
+    # block_rois_multiEps = [copy.deepcopy(block) for block in block_rois_raw*len(dbscan_objs)] 
+
+    # n_bse = n_blocks_single_eps = len(block_rois_raw)
+    # for jj, dbscan in enumerate(tqdm(dbscan_objs)):
+    #     for ii, block in enumerate(block_rois_raw):
+    #         ## DBSCAN
+    #         db = copy.deepcopy(dbscan)
+    #         db.fit(block['embeddings']) # note that db.labels_==-1 means no cluster found
+    #         db.labels_[freq_of_values(db.labels_) < dbscan.min_samples] = -1 # fail safe because sometimes there are clusters of just 1 for some reason...
+
+    #         labels_unique = np.unique(db.labels_)
+    #         idxCat_ROI_inOuterBlock = block_rois_multiEps[jj*n_bse + ii]['idxCat_ROI_inOuterBlock']
+
+    #         block_rois_multiEps[jj*n_bse + ii]['db'] = db
+    #         block_rois_multiEps[jj*n_bse + ii]['labels_unique'] = labels_unique
+    #         block_rois_multiEps[jj*n_bse + ii]['cluster_sessions'] = [idx_roi_session[idxCat_ROI_inOuterBlock[db.labels_==label]] for label in labels_unique] # list of sessions a unique label derives from. Shape: [n_unique_labels][num of sessions where label is found]
+    #         block_rois_multiEps[jj*n_bse + ii]['cluster_sessions_isUnique'] = np.array([is_unique(sessions) for sessions in block_rois_multiEps[jj*n_bse + ii]['cluster_sessions']]) # boolean. Shape (n_labels_unique). Value whether all the labels derive from unique sessions.    
+    #         block_rois_multiEps[jj*n_bse + ii]['sizes_clusters'] = [(db.labels_==cid).sum() for cid in labels_unique]
+
+    # return block_rois_multiEps
 
 
 def reshape_into_sparse(arr, idx, shape):
     idx = [t.reshape(-1) for t in np.meshgrid(idx, idx)]
-    sp = scipy.sparse.csr_matrix((arr.reshape(1,-1), idx), shape=shape)
+    sp = scipy.sparse.csr_matrix((arr.reshape(-1), idx), shape=shape)
     return sp
 ## combine distances matrices into big distance matrix
 def combine_distances_from_blocks(block_rois, n_roi_all):
     h = scipy.sparse.csr_matrix((n_roi_all, n_roi_all))
-    for i_block, block in enumerate(block_rois):
+    for i_block, block in enumerate(tqdm(block_rois)):
         idx = block['idxCat_ROI_inOuterBlock']
         new = reshape_into_sparse(block['distances'], idx, shape=(n_roi_all, n_roi_all))
-        h = h + new
+        # h = h + new
+        h = h.maximum(new)
         
     return h
