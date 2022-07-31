@@ -1,6 +1,5 @@
 import pathlib
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import multiprocessing as mp
 
 import numpy as np
@@ -227,7 +226,7 @@ class Data_suite2p:
         n = self.n_sessions
         if workers == -1:
             workers = mp.cpu_count()
-        self.spatialFootprints = helpers.simple_multiprocessingmultiprocessing(
+        self.spatialFootprints = helpers.simple_multiprocessing(
             _helper_populate_sf, 
             (self.n_roi, [frame_height_width]*n, statFiles, [dtype]*n, [isInt]*n),
             workers=mp.cpu_count()
