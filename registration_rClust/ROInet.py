@@ -1,21 +1,3 @@
-# # # widen jupyter notebook window
-# # from IPython.display import display, HTML
-# # display(HTML("<style>.container {width:95% !important; }</style>"))
-
-# # check environment
-# import os
-# # print(f'Conda Environment: ' + os.environ['CONDA_DEFAULT_ENV'])
-
-# from pathlib import Path
-
-# import numpy as np
-# from tqdm import tqdm
-# import matplotlib.pyplot as plt
-# import torch
-# import torchvision
-# import scipy.stats
-# import time
-
 import sys
 from pathlib import Path
 import json
@@ -38,12 +20,6 @@ import scipy.signal
 class ROInet_embedder:
     def __init__(
         self,
-            # dir_github='/media/rich/Home_Linux_partition/github_repos/',
-            # 'dir_s2p': '/media/rich/bigSSD/analysis_data/face_rhythm_paper/fig_4/2pRAM_motor_mapping/AEG21/2022_05_13/suite2p_o2_output/jobNum_0/suite2p/plane0/',
-            # 'path_params_nnTraining': '/media/rich/Home_Linux_partition/github_repos/NBAP/pipeline_2pRAM_faceRhythm/classify_ROIs/network/params.json',
-            # 'path_state_dict': '/media/rich/Home_Linux_partition/github_repos/NBAP/pipeline_2pRAM_faceRhythm/classify_ROIs/network/ConvNext_tiny__1_0_unfrozen__simCLR.pth',
-            # 'path_classifier_vars': '/media/rich/Home_Linux_partition/github_repos/NBAP/pipeline_2pRAM_faceRhythm/classify_ROIs/classifier.pkl',
-            # 'pref_saveFigs': False,
         device='cpu',
         dir_networkFiles=None,
         download_from_gDrive='check_local_first',
@@ -79,34 +55,6 @@ class ROInet_embedder:
             verbose (bool):
                 Whether to print out extra information.
         """
-        # import sys
-        # path_script, path_params, dir_save = sys.argv
-        # dir_save = Path(dir_save)
-                        
-        # import json
-        # with open(path_params, 'r') as f:
-        #     params = json.load(f)
-
-        # import shutil
-        # shutil.copy2(path_script, str(Path(dir_save) / Path(path_script).name));
-
-        # params = {
-        #     'dir_github': '/media/rich/Home_Linux_partition/github_repos/',
-        #     'dir_s2p': '/media/rich/bigSSD/analysis_data/face_rhythm_paper/fig_4/2pRAM_motor_mapping/AEG21/2022_05_13/suite2p_o2_output/jobNum_0/suite2p/plane0/',
-        #     'path_params_nnTraining': '/media/rich/Home_Linux_partition/github_repos/NBAP/pipeline_2pRAM_faceRhythm/classify_ROIs/network/params.json',
-        #     'path_state_dict': '/media/rich/Home_Linux_partition/github_repos/NBAP/pipeline_2pRAM_faceRhythm/classify_ROIs/network/ConvNext_tiny__1_0_unfrozen__simCLR.pth',
-        #     'path_classifier_vars': '/media/rich/Home_Linux_partition/github_repos/NBAP/pipeline_2pRAM_faceRhythm/classify_ROIs/classifier.pkl',
-        #     'pref_saveFigs': False,
-        #     'useGPU': True,
-        #     'classes_toInclude': [0,1,2]
-        # }
-
-        # import sys
-        # sys.path.append(params['dir_github'])
-
-        # print('starting: importing custom modules')
-        # from basic_neural_processing_modules import pickle_helpers, indexing, torch_helpers
-
         self.device = device
         self.verbose = verbose
 
