@@ -51,24 +51,24 @@ class ROI_graph:
         )
         del sf
 
-        d_NN  = torch.cdist(features_NN.to(self._device),  features_NN.to(self._device),  p=2).cpu()
-        d_SWT = torch.cdist(features_SWT.to(self._device), features_SWT.to(self._device), p=2).cpu()
 
         s_sf = 1 - d_sf.toarray()
+        del d_sf
         s_sf[s_sf < 0] = 0
         s_sf[range(s_sf.shape[0]), range(s_sf.shape[0])] = 0
         s_sf = torch.as_tensor(s_sf, dtype=torch.float32)
-        del d_sf
 
+        d_NN  = torch.cdist(features_NN.to(self._device),  features_NN.to(self._device),  p=2).cpu()
         s_NN = 1 / (d_NN / d_NN.max())
+        del d_NN
         s_NN[s_NN < 0] = 0
         s_NN[range(s_NN.shape[0]), range(s_NN.shape[0])] = 0
-        del d_NN
 
+        d_SWT = torch.cdist(features_SWT.to(self._device), features_SWT.to(self._device), p=2).cpu()
         s_SWT = 1 / (d_SWT / d_SWT.max())
+        del d_SWT
         s_SWT[s_SWT < 0] = 0
         s_SWT[range(s_SWT.shape[0]), range(s_SWT.shape[0])] = 0
-        del d_SWT
 
         session_bool = torch.as_tensor(ROI_session_bool, device='cpu', dtype=torch.float32)
         s_sesh = torch.logical_not((session_bool @ session_bool.T).type(torch.bool))
