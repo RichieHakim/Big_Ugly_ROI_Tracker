@@ -207,9 +207,9 @@ class ROInet_embedder:
             raise Exception('dataloader not defined. Call generate_dataloader() first.')
 
         print(f'starting: running data through network')
-        self.ROI_latents = torch.cat([self.net(data[0][0].to(self.device)).detach() for data in tqdm(self.dataloader)], dim=0).cpu()
+        self.latents = torch.cat([self.net(data[0][0].to(self.device)).detach() for data in tqdm(self.dataloader)], dim=0).cpu()
         print(f'completed: running data through network')
-        return self.ROI_latents
+        return self.latents
 
 
     def _download_network_files(self):

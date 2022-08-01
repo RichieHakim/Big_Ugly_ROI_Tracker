@@ -194,6 +194,9 @@ class Data_suite2p:
          in the stat files into images in sparse arrays.
         Output will be a list of arrays of shape 
          (n_roi, frame height, frame width).
+        Also generates self.sessionID_concat which is a bool np.ndarray
+         of shape(n_roi, n_sessions) indicating which session each ROI
+         belongs to.
         
         Args:
             frame_height_width (list or tuple):
@@ -231,6 +234,8 @@ class Data_suite2p:
             (self.n_roi, [frame_height_width]*n, statFiles, [dtype]*n, [isInt]*n),
             workers=mp.cpu_count()
         )
+
+        self.sessionID_concat = np.vstack([np.array([helpers.idx2bool(i_sesh, length=len(self.spatialFootprints))]*sesh.shape[0]) for i_sesh, sesh in enumerate(self.spatialFootprints)])
 
         if self.verbose:
             print(f"Imported {len(self.spatialFootprints)} spatial footprints into sparse arrays.")

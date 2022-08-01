@@ -89,135 +89,25 @@ def cosine_kernel_2D(center=(5,5), image_size=(11,11), width=5):
     return k_cos
 
 
-def get_dir_contents(directory):
+def idx2bool(idx, length=None):
     '''
-    Get the contents of a directory (does not
-     include subdirectories).
+    Converts a vector of indices to a boolean vector.
     RH 2021
 
     Args:
-        directory (str):
-            path to directory
+        idx (np.ndarray):
+            1-D array of indices.
+        length (int):
+            Length of boolean vector.
+            If None then length will be set to
+             the maximum index in idx + 1.
     
     Returns:
-        folders (List):
-            list of folder names
-        files (List):
-            list of file names
+        bool_vec (np.ndarray):
+            1-D boolean array.
     '''
-    walk = os.walk(directory, followlinks=False)
-    folders = []
-    files = []
-    for ii,level in enumerate(walk):
-        folders, files = level[1:]
-        if ii==0:
-            break
-    return folders, files
-
-
-
-def hash_file(path, type_hash='MD5', buffer_size=65536):
-    """
-    Gets hash of a file.
-    Based on: https://stackoverflow.com/questions/22058048/hashing-a-file-in-python
-    RH 2022
-
-    Args:
-        path (str):
-            Path to file to be hashed.
-        type_hash (str):
-            Type of hash to use. Can be:
-                'MD5'
-                'SHA1'
-                'SHA256'
-                'SHA512'
-        buffer_size (int):
-            Buffer size for reading file.
-            65536 corresponds to 64KB.
-
-    Returns:
-        hash (str):
-            Hash of file.
-    """
-
-    if type_hash == 'MD5':
-        hasher = hashlib.md5()
-    elif type_hash == 'SHA1':
-        hasher = hashlib.sha1()
-    elif type_hash == 'SHA256':
-        hasher = hashlib.sha256()
-    elif type_hash == 'SHA512':
-        hasher = hashlib.sha512()
-    else:
-        raise ValueError(f'{type_hash} is not a valid hash type.')
-
-    with open(path, 'rb') as f:
-        while True:
-            data = f.read(buffer_size)
-            if not data:
-                break
-            hasher.update(data)
-
-    hash = hasher.hexdigest()
-        
-    return hash
-
-
-def compare_file_hashes(
-    hash_dict_true,
-    dir_files_test=None,
-    paths_files_test=None,
-    verbose=True,
-):
-    """
-    Compares hashes of files in a directory or list of paths
-     to user provided hashes.
-    RH 2022
-
-    Args:
-        hash_dict_true (dict):
-            Dictionary of hashes to compare to.
-            Each entry should be:
-                {'key': ('filename', 'hash')}
-        dir_files_test (str):
-            Path to directory to compare hashes of files in.
-            Unused if paths_files_test is not None.
-        paths_files_test (list of str):
-            List of paths to files to compare hashes of.
-            Optional. dir_files_test is used if None.
-        verbose (bool):
-            Whether or not to print out failed comparisons.
-
-    Returns:
-        total_result (bool):
-            Whether or not all hashes were matched.
-        individual_results (list of bool):
-            Whether or not each hash was matched.
-        paths_matching (dict):
-            Dictionary of paths that matched.
-            Each entry is:
-                {'key': 'path'}
-    """
-    if paths_files_test is None:
-        if dir_files_test is None:
-            raise ValueError('Must provide either dir_files_test or path_files_test.')
-        
-        ## make a dict of {filename: path} for each file in dir_files_test
-        files_test = {filename: (Path(dir_files_test).resolve() / filename).as_posix() for filename in get_dir_contents(dir_files_test)[1]} 
-    
-    paths_matching = {}
-    results_matching = {}
-    for key, (filename, hash) in hash_dict_true.items():
-        match = True
-        if filename not in files_test:
-            print(f'{filename} not found in test directory: {dir_files_test}.') if verbose else None
-            match = False
-        elif hash != hash_file(files_test[filename]):
-            print(f'{filename} hash mismatch with {key, filename}.') if verbose else None
-            match = False
-        if match:
-            paths_matching[key] = files_test[filename]
-        results_matching[key] = match
-
-    return all(results_matching.values()), results_matching, paths_matching
-
+    if length is None:
+        length = np.uint64(np.max(idx) + 1)
+    out = np.zeros(length, dtype=np.bool8)
+    out[idx] = True
+    return out
