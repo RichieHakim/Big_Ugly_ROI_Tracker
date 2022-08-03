@@ -14,7 +14,8 @@ from . import helpers
 class ROI_graph:
     """
     Class for building similarity and distance graphs
-     between ROIs based on their features
+     between ROIs based on their features, and for generating
+     potential clusters of ROIs.
     These methods can be improved in their memory handling 
      by performing them over each block of the FOV.
     RH 2022
