@@ -111,3 +111,9 @@ def idx2bool(idx, length=None):
     out = np.zeros(length, dtype=np.bool8)
     out[idx] = True
     return out
+
+
+def merge_dicts(dicts):
+    out = {}
+    [out.update(d) for d in dicts]
+    return out    
