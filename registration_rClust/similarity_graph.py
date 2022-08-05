@@ -5,9 +5,11 @@ import sklearn
 import sklearn.neighbors
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import sparse
 
 import gc
 import multiprocessing as mp
+import time
 
 from . import helpers
 
@@ -26,6 +28,13 @@ class ROI_graph:
         device='cpu',
         n_workers=1,
         spatialFootprint_maskPower=0.8,
+        frame_height=512,
+        frame_width=1024,
+        block_height=100,
+        block_width=100,
+        overlapping_width_Multiplier=0.2,
+        outer_block_height=None,
+        outer_block_width=None,
         algorithm_nearestNeigbors_spatialFootprints='brute',
         n_neighbors_nearestNeighbors_spatialFootprints='full',
         **kwargs_nearestNeigbors_spatialFootprints
@@ -64,8 +73,107 @@ class ROI_graph:
 
         self.n_workers = mp.cpu_count() if n_workers == -1 else n_workers
 
+        self.frame_height = frame_height
+        self.frame_width = frame_width
 
-    def compute_similarity_graph(
+        self.blocks, self.outer_blocks, (self._centers_y, self._centers_x) = self._make_block_batches(
+            frame_height=frame_height,
+            frame_width=frame_width,
+            block_height=block_height,
+            block_width=block_width,
+            overlapping_width_Multiplier=overlapping_width_Multiplier,
+            outer_block_height=outer_block_height,
+            outer_block_width=outer_block_width,
+            clamp_outer_block_to_frame=True,
+        )
+
+
+    # def compute_similarity_graph(
+    #     self,
+    #     spatialFootprints,
+    #     features_NN,
+    #     features_SWT,
+    #     ROI_session_bool,
+    # ):
+    #     """
+    #     Compute the similarity matrix between ROIs based on the 
+    #      conjunction of the similarity matrices for different modes
+    #      (like the NN embedding, the SWT embedding, and the spatial footprint
+    #      overlap).
+
+    #     Args:
+    #         spatialFootprints (list of scipy.sparse.csr_matrix):
+    #             The spatial footprints of the ROIs.
+    #             list of shape (n_ROIs for each session, FOV height * FOV width)
+    #         features_NN (torch.Tensor):
+    #             The output latent embeddings of the NN model.
+    #             shape (n_ROIs total, n_features)
+    #         features_SWT (torch.Tensor):
+    #             The output latent embeddings of the SWT model.
+    #             shape (n_ROIs total, n_features)
+    #         ROI_session_bool (np.ndarray):
+    #             The boolean matrix indicating which ROIs belong to which session.
+    #             shape (n_ROIs total, n_sessions)
+    #     """
+
+    #     sf = scipy.sparse.vstack(spatialFootprints)
+    #     sf = sf.power(self._sf_maskPower)
+    #     sf = sf.multiply( 0.5 / sf.sum(1))
+    #     sf = scipy.sparse.csr_matrix(sf)
+
+    #     self.n_roi = sf.shape[0]
+    #     self.n_sessions = len(spatialFootprints)
+
+    #     d_sf = sklearn.neighbors.NearestNeighbors(
+    #         algorithm=self._algo_sf,
+    #         metric='manhattan',
+    #         p=1,
+    #         n_jobs=self.n_workers,
+    #         **self._kwargs_sf
+    #     ).fit(sf).kneighbors_graph(
+    #         sf,
+    #         n_neighbors=self._nn_sf if self._nn_sf != 'full' else sf.shape[0],
+    #         mode='distance'
+    #     )
+    #     del sf
+
+
+    #     s_sf = 1 - d_sf.toarray()
+    #     del d_sf
+    #     s_sf[s_sf < 0] = 0
+    #     s_sf[range(s_sf.shape[0]), range(s_sf.shape[0])] = 0
+    #     s_sf = torch.as_tensor(s_sf, dtype=torch.float32)
+
+    #     d_NN  = torch.cdist(features_NN.to(self._device),  features_NN.to(self._device),  p=2).cpu()
+    #     s_NN = 1 / (d_NN / d_NN.max())
+    #     del d_NN
+    #     s_NN[s_NN < 0] = 0
+    #     s_NN[range(s_NN.shape[0]), range(s_NN.shape[0])] = 0
+
+    #     d_SWT = torch.cdist(features_SWT.to(self._device), features_SWT.to(self._device), p=2).cpu()
+    #     s_SWT = 1 / (d_SWT / d_SWT.max())
+    #     del d_SWT
+    #     s_SWT[s_SWT < 0] = 0
+    #     s_SWT[range(s_SWT.shape[0]), range(s_SWT.shape[0])] = 0
+
+    #     session_bool = torch.as_tensor(ROI_session_bool, device='cpu', dtype=torch.float32)
+    #     s_sesh = torch.logical_not((session_bool @ session_bool.T).type(torch.bool))
+
+    #     self.s_conj = s_sf * s_NN * s_SWT * s_sesh
+    #     del s_sf, s_NN, s_SWT, s_sesh
+        
+    #     self.d_conj = 1 / self.s_conj
+    #     self.d_conj[torch.isinf(self.d_conj).type(torch.bool)] = 10000  ## convert inf
+    #     self.d_conj = torch.maximum( self.d_conj, self.d_conj.T )  ## force symmetry
+    #     self.d_conj[torch.arange(self.d_conj.shape[0]), torch.arange(self.d_conj.shape[0])] = 0  ## set diagonal to 0
+    #     self.d_conj = scipy.sparse.csr_matrix(self.d_conj.numpy())  ## sparsen
+
+    #     gc.collect()
+
+    #     return self.s_conj, self.d_conj
+
+
+    def _compute_similarity_graph(
         self,
         spatialFootprints,
         features_NN,
@@ -98,58 +206,86 @@ class ROI_graph:
         sf = sf.multiply( 0.5 / sf.sum(1))
         sf = scipy.sparse.csr_matrix(sf)
 
-        self.n_roi = sf.shape[0]
-        self.n_sessions = len(spatialFootprints)
-
         d_sf = sklearn.neighbors.NearestNeighbors(
             algorithm=self._algo_sf,
             metric='manhattan',
             p=1,
-            n_jobs=self.n_workers,
+            # n_jobs=self.n_workers,
+            n_jobs=-1,
             **self._kwargs_sf
         ).fit(sf).kneighbors_graph(
             sf,
-            n_neighbors=self._nn_sf if self._nn_sf != 'full' else sf.shape[0],
+            n_neighbors=sf.shape[0],
             mode='distance'
         )
-        del sf
 
 
         s_sf = 1 - d_sf.toarray()
-        del d_sf
         s_sf[s_sf < 0] = 0
         s_sf[range(s_sf.shape[0]), range(s_sf.shape[0])] = 0
         s_sf = torch.as_tensor(s_sf, dtype=torch.float32)
 
         d_NN  = torch.cdist(features_NN.to(self._device),  features_NN.to(self._device),  p=2).cpu()
         s_NN = 1 / (d_NN / d_NN.max())
-        del d_NN
         s_NN[s_NN < 0] = 0
         s_NN[range(s_NN.shape[0]), range(s_NN.shape[0])] = 0
 
         d_SWT = torch.cdist(features_SWT.to(self._device), features_SWT.to(self._device), p=2).cpu()
         s_SWT = 1 / (d_SWT / d_SWT.max())
-        del d_SWT
         s_SWT[s_SWT < 0] = 0
         s_SWT[range(s_SWT.shape[0]), range(s_SWT.shape[0])] = 0
 
         session_bool = torch.as_tensor(ROI_session_bool, device='cpu', dtype=torch.float32)
         s_sesh = torch.logical_not((session_bool @ session_bool.T).type(torch.bool))
 
-        self.s_conj = s_sf * s_NN * s_SWT * s_sesh
-        del s_sf, s_NN, s_SWT, s_sesh
+        s_conj = s_sf * s_NN * s_SWT * s_sesh
+
+        return s_conj
+
+
+    def _compute_similarity_blockwise(
+        self,
+        spatialFootprints,
+        features_NN,
+        features_SWT,
+        ROI_session_bool,
+    ):
+        sf_cat = scipy.sparse.vstack(spatialFootprints)
+        n_roi = sf_cat.shape[0]
+        # print('hi')
+
+        s_all = [scipy.sparse.lil_matrix((n_roi, n_roi)) for _ in self.blocks]
+        # d_all = scipy.sparse.lil_matrix((n_roi, n_roi))
+
+        for ii, block in tqdm(enumerate(self.blocks), total=len(self.blocks)):
+            # print(block)
+            idxPixels_block = np.zeros((self.frame_height, self.frame_width), dtype=np.bool8)
+            idxPixels_block[block[0][0]:block[0][1], block[1][0]:block[1][1]] = True
+            idxPixels_block = np.where(idxPixels_block.reshape(-1))[0]
+            idxROI_block = np.where(sf_cat[:, idxPixels_block].sum(1) > 0)[0]
+            # print(idxROI_block)
+
+            s_block = self._compute_similarity_graph(
+                spatialFootprints=sf_cat[idxROI_block][:, idxPixels_block].power(self._sf_maskPower),
+                features_NN=features_NN[idxROI_block],
+                features_SWT=features_SWT[idxROI_block],
+                ROI_session_bool=ROI_session_bool[idxROI_block],
+            )
+            
+            idx = np.meshgrid(idxROI_block, idxROI_block)
+            s_all[ii][idx[0], idx[1]] = s_block
+
+        self.s = sparse.stack([sparse.COO(t) for t in s_all], axis=2).max(2)
+        self.s = sparse.stack((self.s, self.s.T), axis=2).max(2).tocsr()  ## force symmetry
         
-        self.d_conj = 1 / self.s_conj
-        self.d_conj[torch.isinf(self.d_conj).type(torch.bool)] = 10000  ## convert inf
-        self.d_conj = torch.maximum( self.d_conj, self.d_conj.T )  ## force symmetry
-        self.d_conj[torch.arange(self.d_conj.shape[0]), torch.arange(self.d_conj.shape[0])] = 0  ## set diagonal to 0
-        self.d_conj = scipy.sparse.csr_matrix(self.d_conj.numpy())  ## sparsen
+        self.d = self.s.power(-1).tolil()
+        # d[torch.isinf(d).type(torch.bool)] = 10000  ## convert inf
+        self.d[np.arange(self.d.shape[0]), np.arange(self.d.shape[0])] = 0  ## set diagonal to 0
+        # d = scipy.sparse.csr_matrix(d.numpy())  ## sparsen
+        self.d = self.d.tocsr()
 
-        gc.collect()
+        return self.s, self.d
 
-        return self.s_conj, self.d_conj
-
-    
     def linkage_clustering(
         self, 
         linkage_methods=['single', 'complete', 'ward', 'average'],
@@ -195,16 +331,16 @@ class ROI_graph:
         # cluster_idx, cluster_idx_freq = np.unique(cluster_idx, axis=0, return_counts=True)
 
         self.cluster_idx = [torch.LongTensor(vec.indices) for vec in cluster_bool_all[idx_clusters_inRange][idx]]
-        self.cluster_bool_freq = c
+        self.cluster_freq = c
         print(f'Completed: filtering clusters by size removing redundant clusters') if verbose else None
 
-        return self.cluster_bool
+        return self.cluster_idx
 
 
     def _cluster_similarity_score(
         self,
         s,
-        cluster_bool,
+        # cluster_bool,
         locality=1,
         method_in='mean',
         method_out='max',
@@ -243,10 +379,12 @@ class ROI_graph:
                 Must be one of "mean", "max", "min".
         """
 
-        self.cluster_idx = [torch.as_tensor(vec.indices, dtype=torch.int32, device=s.device) for vec in cluster_bool]
+        # self.cluster_idx = [torch.as_tensor(vec.indices, dtype=torch.int32, device=s.device) for vec in cluster_bool]
 
-        n_clusters = cluster_bool.shape[0]
-        n_samples = cluster_bool.shape[1]
+        n_clusters = len(self.cluster_idx)
+        n_samples = s.shape[1]
+
+        print(n_clusters, n_samples)
         
         DEVICE = s.device
         s_tu = (s**locality).type(torch.float32)
@@ -300,13 +438,117 @@ class ROI_graph:
         else:
             raise ValueError('method_out must be one of "mean", "max", "min".')
 
-        c = torch.as_tensor([fn_mo(s_tu[self.cluster_idx[ii]][:, self.cluster_idx[jj]]) for ii,jj in tqdm(zip(yyf, xxf), total=len(yyf))], device=DEVICE).reshape(n_clusters, n_clusters)
-        c[torch.eye(n_clusters, dtype=torch.bool)] = torch.as_tensor([fn_mi(s_tu[self.cluster_idx[ii]][:, self.cluster_idx[ii]]) for ii in range(n_clusters)], device=DEVICE)
-        
-        # c = torch.as_tensor([fn_mo(s_tu[h_tu[ii]][:, h_tu[jj]]) for ii,jj in tqdm(zip(yyf, xxf), total=len(yyf))], device=DEVICE).reshape(n_clusters, n_clusters)
-        # c[torch.eye(n_clusters, dtype=torch.bool)] = torch.as_tensor([fn_mi(s_tu[h_tu[ii]][:, h_tu[ii]]) for ii in range(n_clusters)], device=DEVICE)
+        return yyf, xxf
 
-        return c
+        # print(s_tu[self.cluster_idx[0]][:, self.cluster_idx[1]])
+
+        # fn_mo = lambda x: 0
+
+        # c = torch.as_tensor([fn_mo(s_tu[self.cluster_idx[ii]][:, self.cluster_idx[jj]]) for ii,jj in tqdm(zip(yyf, xxf), total=len(yyf))], device=DEVICE).reshape(n_clusters, n_clusters)
+        # c[torch.eye(n_clusters, dtype=torch.bool)] = torch.as_tensor([fn_mi(s_tu[self.cluster_idx[ii]][:, self.cluster_idx[ii]]) for ii in range(n_clusters)], device=DEVICE)
+        
+        # # c = torch.as_tensor([fn_mo(s_tu[h_tu[ii]][:, h_tu[jj]]) for ii,jj in tqdm(zip(yyf, xxf), total=len(yyf))], device=DEVICE).reshape(n_clusters, n_clusters)
+        # # c[torch.eye(n_clusters, dtype=torch.bool)] = torch.as_tensor([fn_mi(s_tu[h_tu[ii]][:, h_tu[ii]]) for ii in range(n_clusters)], device=DEVICE)
+
+        # return c
+
+
+
+
+###########################
+####### block stuff #######
+###########################
+
+    def _make_block_batches(
+        self,
+        frame_height=512,
+        frame_width=1024,
+        block_height=100,
+        block_width=100,
+        overlapping_width_Multiplier=0.2,
+        outer_block_height=None,
+        outer_block_width=None,
+        clamp_outer_block_to_frame=True,
+    ):     
+        
+        # block prep
+        block_height_half = block_height//2
+        block_width_half = block_width//2
+        
+        # inner block prep
+        if outer_block_height is None:
+            outer_block_height = block_height * 1.5
+            print(f'Outer block height not specified. Using {outer_block_height}')
+        if outer_block_width is None:
+            outer_block_width = block_width * 1.5
+            print(f'Outer block width not specified. Using {outer_block_width}')
+            
+        outer_block_height_half = outer_block_height//2
+        outer_block_width_half = outer_block_width//2
+        
+        # find centers of blocks
+    #     n_blocks_x = np.ceil((frame_width*overlapping_width_Multiplier) / block_width).astype(np.int64)
+        n_blocks_x = np.ceil(frame_width / (block_width - (block_width*overlapping_width_Multiplier))).astype(np.int64)
+        
+        centers_x = np.linspace(
+            start=block_width_half,
+            stop=frame_width - block_width_half,
+            num=n_blocks_x,
+            endpoint=True
+        )
+
+    #     n_blocks_y = frame_height / block_height
+        n_blocks_y = np.ceil(frame_height / (block_height - (block_height*overlapping_width_Multiplier))).astype(np.int64)
+    #     n_blocks_y = np.ceil(n_blocks_y*overlapping_width_Multiplier).astype(np.int64)
+        centers_y = np.linspace(
+            start=block_height_half,
+            stop=frame_height - block_height_half,
+            num=n_blocks_y,
+            endpoint=True
+        )
+        
+    #     print(n_blocks_x)
+    #     print(centers_x)
+        
+        # make blocks
+        blocks, outer_blocks = [], []
+        for i_x in range(n_blocks_x):
+            for i_y in range(n_blocks_y):
+                blocks.append([
+                    list(np.int64([centers_y[i_y] - block_height_half , centers_y[i_y] + block_height_half])),
+                    list(np.int64([centers_x[i_x] - block_width_half , centers_x[i_x] + block_width_half]))
+                ])
+                
+                outer_blocks.append([
+                    list(np.int64([centers_y[i_y] - outer_block_height_half , centers_y[i_y] + outer_block_height_half])),
+                    list(np.int64([centers_x[i_x] - outer_block_width_half , centers_x[i_x] + outer_block_width_half]))                
+                ])
+                
+        # clamp outer block to limits of frame
+        if clamp_outer_block_to_frame:
+            for ii, outer_block in enumerate(outer_blocks):
+                br_h = np.array(outer_block[0]) # block range height
+                br_w = np.array(outer_block[1]) # block range width
+                valid_h = (br_h>0) * (br_h<frame_height)
+                valid_w = (br_w>0) * (br_w<frame_width)
+                outer_blocks[ii] = [
+                    list( (br_h * valid_h) + (np.array([0, frame_height])*np.logical_not(valid_h)) ),
+                    list( (br_w * valid_w) + (np.array([0, frame_width])*np.logical_not(valid_w)) ),            
+                ]
+            
+        return blocks, outer_blocks, (centers_y, centers_x)
+
+
+    def visualize_blocks(
+        self,
+    ):
+        im = np.zeros((self.frame_height, self.frame_width, 3))
+        for block in self.blocks:
+            im[block[0][0]:block[0][1], block[1][0]:block[1][1], 0] += 0.2
+        for block in self.outer_blocks:
+            im[block[0][0]:block[0][1], block[1][0]:block[1][1], 1] += 0.2
+        plt.figure()
+        plt.imshow(im)
 
 
 
@@ -323,101 +565,3 @@ def hash_matrix(x):
     return np.array([hash(tuple(vec)) for vec in y])
 
 
-
-
-###########################
-####### block stuff #######
-###########################
-
-def make_block_batches(
-    frame_height=512,
-    frame_width=1024,
-    block_height=100,
-    block_width=100,
-    overlapping_width_Multiplier=2,
-    outer_block_height=None,
-    outer_block_width=None,
-    clamp_outer_block_to_frame=True,
-):     
-    
-    # block prep
-    block_height_half = block_height//2
-    block_width_half = block_width//2
-    
-    # inner block prep
-    if outer_block_height is None:
-        outer_block_height = block_height * 1.5
-        print(f'Outer block height not specified. Using {outer_block_height}')
-    if outer_block_width is None:
-        outer_block_width = block_width * 1.5
-        print(f'Outer block width not specified. Using {outer_block_width}')
-        
-    outer_block_height_half = outer_block_height//2
-    outer_block_width_half = outer_block_width//2
-    
-    # find centers of blocks
-#     n_blocks_x = np.ceil((frame_width*overlapping_width_Multiplier) / block_width).astype(np.int64)
-    n_blocks_x = np.ceil(frame_width / (block_width - (block_width*overlapping_width_Multiplier))).astype(np.int64)
-
-    centers_x = np.linspace(
-        start=block_width_half,
-        stop=frame_width - block_width_half,
-        num=n_blocks_x,
-        endpoint=True
-    )
-
-#     n_blocks_y = frame_height / block_height
-    n_blocks_y = np.ceil(frame_height / (block_height - (block_height*overlapping_width_Multiplier))).astype(np.int64)
-#     n_blocks_y = np.ceil(n_blocks_y*overlapping_width_Multiplier).astype(np.int64)
-    centers_y = np.linspace(
-        start=block_height_half,
-        stop=frame_height - block_height_half,
-        num=n_blocks_y,
-        endpoint=True
-    )
-    
-#     print(n_blocks_x)
-#     print(centers_x)
-    
-    # make blocks
-    blocks, outer_blocks = [], []
-    for i_x in range(n_blocks_x):
-        for i_y in range(n_blocks_y):
-            blocks.append([
-                list(np.int64([centers_y[i_y] - block_height_half , centers_y[i_y] + block_height_half])),
-                list(np.int64([centers_x[i_x] - block_width_half , centers_x[i_x] + block_width_half]))
-            ])
-            
-            outer_blocks.append([
-                list(np.int64([centers_y[i_y] - outer_block_height_half , centers_y[i_y] + outer_block_height_half])),
-                list(np.int64([centers_x[i_x] - outer_block_width_half , centers_x[i_x] + outer_block_width_half]))                
-            ])
-            
-    # clamp outer block to limits of frame
-    if clamp_outer_block_to_frame:
-        for ii, outer_block in enumerate(outer_blocks):
-            br_h = np.array(outer_block[0]) # block range height
-            br_w = np.array(outer_block[1]) # block range width
-            valid_h = (br_h>0) * (br_h<frame_height)
-            valid_w = (br_w>0) * (br_w<frame_width)
-            outer_blocks[ii] = [
-                list( (br_h * valid_h) + (np.array([0, frame_height])*np.logical_not(valid_h)) ),
-                list( (br_w * valid_w) + (np.array([0, frame_width])*np.logical_not(valid_w)) ),            
-            ]
-        
-    return blocks, outer_blocks, (centers_y, centers_x)
-
-
-def visualize_blocks(
-    inner_blocks, 
-    outer_blocks, 
-    frame_height=512, 
-    frame_width=1024
-):
-    im = np.zeros((frame_height, frame_width, 3))
-    for block in inner_blocks:
-        im[block[0][0]:block[0][1], block[1][0]:block[1][1], 0] += 0.2
-    for block in outer_blocks:
-        im[block[0][0]:block[0][1], block[1][0]:block[1][1], 1] += 0.2
-    plt.figure()
-    plt.imshow(im)
