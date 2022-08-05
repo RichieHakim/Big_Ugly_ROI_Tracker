@@ -4,6 +4,7 @@ import torch
 import sklearn
 import sklearn.neighbors
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 import gc
 import multiprocessing as mp
@@ -61,8 +62,7 @@ class ROI_graph:
         self._nn_sf = n_neighbors_nearestNeighbors_spatialFootprints
         self._kwargs_sf = kwargs_nearestNeigbors_spatialFootprints
 
-        if n_workers == -1:
-            self.n_workers = mp.cpu_count()
+        self.n_workers = mp.cpu_count() if n_workers == -1 else n_workers
 
 
     def compute_similarity_graph(
@@ -92,10 +92,14 @@ class ROI_graph:
                 The boolean matrix indicating which ROIs belong to which session.
                 shape (n_ROIs total, n_sessions)
         """
+
         sf = scipy.sparse.vstack(spatialFootprints)
         sf = sf.power(self._sf_maskPower)
         sf = sf.multiply( 0.5 / sf.sum(1))
         sf = scipy.sparse.csr_matrix(sf)
+
+        self.n_roi = sf.shape[0]
+        self.n_sessions = len(spatialFootprints)
 
         d_sf = sklearn.neighbors.NearestNeighbors(
             algorithm=self._algo_sf,
@@ -150,6 +154,9 @@ class ROI_graph:
         self, 
         linkage_methods=['single', 'complete', 'ward', 'average'],
         linkage_distances=[0.1, 0.2, 0.4, 0.8],
+        min_cluster_size=2,
+        max_cluster_size=None,
+        batch_size=100,
         verbose=True,
     ):
         """
@@ -162,27 +169,23 @@ class ROI_graph:
         print(f'Completed: computing linkage') if verbose else None
 
         print(f'Starting: clustering') if verbose else None
-        self._cluster_idx_all = []
+        cluster_bool_all = []
         for ii, t in tqdm(enumerate(linkage_distances)):
-            [self._cluster_idx_all.append(scipy.sparse.csr_matrix(labels_to_bool(scipy.cluster.hierarchy.fcluster(self.links[method], t=t, criterion='distance')))) for method in linkage_methods]
-        self._cluster_idx_all = scipy.sparse.vstack(self._cluster_idx_all)
+            [cluster_bool_all.append(scipy.sparse.csr_matrix(labels_to_bool(scipy.cluster.hierarchy.fcluster(self.links[method], t=t, criterion='distance')))) for method in linkage_methods]
+        cluster_bool_all = scipy.sparse.vstack(cluster_bool_all)
         print(f'Completed: clustering') if verbose else None
 
-    
-    def find_unique_clusters(self,):
+        print(f'Starting: filtering clusters by size removing redundant clusters') if verbose else None
+        max_cluster_size = self.n_sessions if max_cluster_size is None else max_cluster_size
+        nROIperCluster = np.array(cluster_bool_all.sum(1)).squeeze()
+        idx_clusters_inRange = np.where( (nROIperCluster >= min_cluster_size) & (nROIperCluster <= max_cluster_size) )[0]
+        
         clusterHashes = np.concatenate(helpers.simple_multiprocessing(
             hash_matrix, 
-            [helpers.make_batches(self._cluster_idx_all, batch_size=100, length=self._cluster_idx_all.shape[0])], 
+            [helpers.make_batches(cluster_bool_all[idx_clusters_inRange], batch_size=batch_size, length=len(idx_clusters_inRange))], 
             workers=self.n_workers
         ), axis=0)
-
-        # clusterHashes_block = [hash(tuple(vec)) for vec in cluster_idx]
-        # u, idx, c = np.unique(
-        #     ar=clusterHashes_block,
-        #     return_index=True,
-        #     return_counts=True,
-        # )
-
+        
         u, idx, c = np.unique(
             ar=clusterHashes,
             return_index=True,
@@ -191,10 +194,120 @@ class ROI_graph:
 
         # cluster_idx, cluster_idx_freq = np.unique(cluster_idx, axis=0, return_counts=True)
 
-        self.cluster_idx = self._cluster_idx_all[idx]
-        self.cluster_idx_freq = c
+        self.cluster_idx = [torch.LongTensor(vec.indices) for vec in cluster_bool_all[idx_clusters_inRange][idx]]
+        self.cluster_bool_freq = c
+        print(f'Completed: filtering clusters by size removing redundant clusters') if verbose else None
 
-        return self.cluster_idx
+        return self.cluster_bool
+
+
+    def _cluster_similarity_score(
+        self,
+        s,
+        cluster_bool,
+        locality=1,
+        method_in='mean',
+        method_out='max',
+    ):
+        """
+        Function to compute the aggregated similarity / dispersion score 
+        of clusters.
+        Here, the score measures the similarity between samples within
+        a cluster and between samples within a cluster and all other samples.
+        To compute a true silhouette score, use:
+        method_in='mean' and method_out='max'.
+        For a score similar to complete linkage, use:
+        method_in='min' and method_out='max'.
+
+        RH 2022
+
+        Args:
+            s (torch.Tensor, dtype float):
+                The similarity matrix.
+                shape: (n_samples, n_samples)
+            cluster_bool (aka 'h') (scipy.sparse.csr_matrix, dtype bool):
+                The boolean matrix indicating which samples are in each cluster.
+                shape: (n_clusters, n_samples)
+            locality (float):
+                The exponent applied to the similarity matrix.
+                Higher values make the score more dependent on local 
+                similarity. 
+                Setting method_out to 'mean' and using a high locality 
+                value can result in something similar to a silhouette
+                score.
+            method_in (str):
+                The method used to compute the within-cluster similarity.
+                Must be one of "mean", "max", "min".
+            method_out (str):
+                The method used to compute the between-cluster similarity.
+                Must be one of "mean", "max", "min".
+        """
+
+        self.cluster_idx = [torch.as_tensor(vec.indices, dtype=torch.int32, device=s.device) for vec in cluster_bool]
+
+        n_clusters = cluster_bool.shape[0]
+        n_samples = cluster_bool.shape[1]
+        
+        DEVICE = s.device
+        s_tu = (s**locality).type(torch.float32)
+        # h_tu = helpers.scipy_sparse_to_torch_coo(cluster_bool).to(DEVICE)
+
+        # print(h_tu)
+
+    
+        ii_normFactor = lambda i   : i * (i-1)
+        ij_normFactor = lambda i,j : i * j
+
+        yy, xx = torch.meshgrid(torch.arange(n_clusters), torch.arange(n_clusters), indexing='ij')
+        yyf, xxf = yy.reshape(-1), xx.reshape(-1)
+
+        # sizes_clusters = h_tu.sum(1)
+        sizes_clusters = [len(cIdx) for cIdx in self.cluster_idx]
+
+        # print(sizes_clusters)
+        # return sizes_clusters
+
+        # if method_in=='mean' and method_out=='mean':
+        #     s_tu[torch.arange(n_samples).to(DEVICE), torch.arange(n_samples).to(DEVICE)] = 0
+        #     c = torch.einsum('ab, ac, bd -> cd', s_tu, h_tu, h_tu)  /  \
+        #         ( (torch.eye(n_clusters).to(DEVICE) * ii_normFactor(sizes_clusters)) + ((1-torch.eye(n_clusters).to(DEVICE)) * (sizes_clusters[None,:] * sizes_clusters[:,None])) )
+        #     return c
+
+
+        # if h_tu.dtype != torch.bool:
+        #     raise ValueError(f'h must be a boolean tensor. Got {h_tu.dtype}')
+
+        # s_tu[torch.arange(n_samples).to(DEVICE), torch.arange(n_samples).to(DEVICE)] = torch.nan
+        s_tu[range(n_samples), range(n_samples)] = torch.nan
+        
+        # return s_tu
+
+        if method_in == 'mean':
+            fn_mi = torch.nanmean
+        elif method_in == 'max':
+            fn_mi = helpers.nanmax
+        elif method_in == 'min':
+            fn_mi = helpers.nanmin
+        else:
+            raise ValueError('method_in must be one of "mean", "max", "min".')
+
+        if method_out == 'mean':
+            fn_mo = torch.nanmean
+        elif method_out == 'max':
+            fn_mo = helpers.nanmax
+        elif method_out == 'min':
+            fn_mo = helpers.nanmin
+        else:
+            raise ValueError('method_out must be one of "mean", "max", "min".')
+
+        c = torch.as_tensor([fn_mo(s_tu[self.cluster_idx[ii]][:, self.cluster_idx[jj]]) for ii,jj in tqdm(zip(yyf, xxf), total=len(yyf))], device=DEVICE).reshape(n_clusters, n_clusters)
+        c[torch.eye(n_clusters, dtype=torch.bool)] = torch.as_tensor([fn_mi(s_tu[self.cluster_idx[ii]][:, self.cluster_idx[ii]]) for ii in range(n_clusters)], device=DEVICE)
+        
+        # c = torch.as_tensor([fn_mo(s_tu[h_tu[ii]][:, h_tu[jj]]) for ii,jj in tqdm(zip(yyf, xxf), total=len(yyf))], device=DEVICE).reshape(n_clusters, n_clusters)
+        # c[torch.eye(n_clusters, dtype=torch.bool)] = torch.as_tensor([fn_mi(s_tu[h_tu[ii]][:, h_tu[ii]]) for ii in range(n_clusters)], device=DEVICE)
+
+        return c
+
 
 
 def labels_to_bool(labels):
@@ -208,3 +321,103 @@ def helper_compute_linkage(method, d_sq):
 def hash_matrix(x):
     y = np.array(np.packbits(x.todense(), axis=1))
     return np.array([hash(tuple(vec)) for vec in y])
+
+
+
+
+###########################
+####### block stuff #######
+###########################
+
+def make_block_batches(
+    frame_height=512,
+    frame_width=1024,
+    block_height=100,
+    block_width=100,
+    overlapping_width_Multiplier=2,
+    outer_block_height=None,
+    outer_block_width=None,
+    clamp_outer_block_to_frame=True,
+):     
+    
+    # block prep
+    block_height_half = block_height//2
+    block_width_half = block_width//2
+    
+    # inner block prep
+    if outer_block_height is None:
+        outer_block_height = block_height * 1.5
+        print(f'Outer block height not specified. Using {outer_block_height}')
+    if outer_block_width is None:
+        outer_block_width = block_width * 1.5
+        print(f'Outer block width not specified. Using {outer_block_width}')
+        
+    outer_block_height_half = outer_block_height//2
+    outer_block_width_half = outer_block_width//2
+    
+    # find centers of blocks
+#     n_blocks_x = np.ceil((frame_width*overlapping_width_Multiplier) / block_width).astype(np.int64)
+    n_blocks_x = np.ceil(frame_width / (block_width - (block_width*overlapping_width_Multiplier))).astype(np.int64)
+
+    centers_x = np.linspace(
+        start=block_width_half,
+        stop=frame_width - block_width_half,
+        num=n_blocks_x,
+        endpoint=True
+    )
+
+#     n_blocks_y = frame_height / block_height
+    n_blocks_y = np.ceil(frame_height / (block_height - (block_height*overlapping_width_Multiplier))).astype(np.int64)
+#     n_blocks_y = np.ceil(n_blocks_y*overlapping_width_Multiplier).astype(np.int64)
+    centers_y = np.linspace(
+        start=block_height_half,
+        stop=frame_height - block_height_half,
+        num=n_blocks_y,
+        endpoint=True
+    )
+    
+#     print(n_blocks_x)
+#     print(centers_x)
+    
+    # make blocks
+    blocks, outer_blocks = [], []
+    for i_x in range(n_blocks_x):
+        for i_y in range(n_blocks_y):
+            blocks.append([
+                list(np.int64([centers_y[i_y] - block_height_half , centers_y[i_y] + block_height_half])),
+                list(np.int64([centers_x[i_x] - block_width_half , centers_x[i_x] + block_width_half]))
+            ])
+            
+            outer_blocks.append([
+                list(np.int64([centers_y[i_y] - outer_block_height_half , centers_y[i_y] + outer_block_height_half])),
+                list(np.int64([centers_x[i_x] - outer_block_width_half , centers_x[i_x] + outer_block_width_half]))                
+            ])
+            
+    # clamp outer block to limits of frame
+    if clamp_outer_block_to_frame:
+        for ii, outer_block in enumerate(outer_blocks):
+            br_h = np.array(outer_block[0]) # block range height
+            br_w = np.array(outer_block[1]) # block range width
+            valid_h = (br_h>0) * (br_h<frame_height)
+            valid_w = (br_w>0) * (br_w<frame_width)
+            outer_blocks[ii] = [
+                list( (br_h * valid_h) + (np.array([0, frame_height])*np.logical_not(valid_h)) ),
+                list( (br_w * valid_w) + (np.array([0, frame_width])*np.logical_not(valid_w)) ),            
+            ]
+        
+    return blocks, outer_blocks, (centers_y, centers_x)
+
+
+def visualize_blocks(
+    inner_blocks, 
+    outer_blocks, 
+    frame_height=512, 
+    frame_width=1024
+):
+    im = np.zeros((frame_height, frame_width, 3))
+    for block in inner_blocks:
+        im[block[0][0]:block[0][1], block[1][0]:block[1][1], 0] += 0.2
+    for block in outer_blocks:
+        im[block[0][0]:block[0][1], block[1][0]:block[1][1], 1] += 0.2
+    plt.figure()
+    plt.imshow(im)

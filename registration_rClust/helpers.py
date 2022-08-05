@@ -5,6 +5,8 @@ import hashlib
 from pathlib import Path
 
 import numpy as np
+import torch
+import scipy.sparse
 
 def simple_multithreading(func, args, workers):
     with ThreadPoolExecutor(workers) as ex:
@@ -117,3 +119,56 @@ def merge_dicts(dicts):
     out = {}
     [out.update(d) for d in dicts]
     return out    
+
+
+def nanmax(arr, dim=None, keepdim=False):
+    """
+    Compute the max of an array ignoring any NaNs.
+    RH 2021
+    """
+    if dim is None:
+        kwargs = {}
+    else:
+        kwargs = {
+            'dim': dim,
+            'keepdim': keepdim,
+        }
+    
+    nan_mask = torch.isnan(arr)
+    arr_no_nan = arr.masked_fill(nan_mask, float('-inf'))
+    return torch.max(arr_no_nan, **kwargs)
+
+def nanmin(arr, dim=None, keepdim=False):
+    """
+    Compute the min of an array ignoring any NaNs.
+    RH 2021
+    """
+    if dim is None:
+        kwargs = {}
+    else:
+        kwargs = {
+            'dim': dim,
+            'keepdim': keepdim,
+        }
+    
+    nan_mask = torch.isnan(arr)
+    arr_no_nan = arr.masked_fill(nan_mask, float('inf'))
+    return torch.min(arr_no_nan, **kwargs)
+
+
+def scipy_sparse_to_torch_coo(sp_array, dtype=None):
+    import torch
+
+    coo = scipy.sparse.coo_matrix(sp_array)
+    
+    values = coo.data
+    # print(values.dtype)
+    indices = np.vstack((coo.row, coo.col))
+
+    i = torch.LongTensor(indices)
+    # v = torch.FloatTensor(values)
+    v = torch.as_tensor(values, dtype=dtype) if dtype is not None else values
+    shape = coo.shape
+
+    return torch.sparse_coo_tensor(i, v, torch.Size(shape))
+
