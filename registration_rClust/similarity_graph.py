@@ -17,11 +17,18 @@ from . import helpers
 
 class ROI_graph:
     """
-    Class for building similarity and distance graphs
-     between ROIs based on their features, and for generating
-     potential clusters of ROIs.
-    These methods can be improved in their memory handling 
-     by performing them over each block of the FOV.
+    Class for:
+     1. Building similarity and distance graphs between ROIs
+      based on their features.
+     2. Generating potential clusters of ROIs using linkage 
+      clustering.
+     3. Building a similarity graph between clusters of ROIs.
+     4. Computing silhouette scores for each potential cluster.
+
+    To accelerate computation and reduce memory usage, some of the
+     computations are performed on 'blocks' of the full field of
+     view.
+    
     RH 2022
     """
     def __init__(
@@ -39,6 +46,7 @@ class ROI_graph:
         algorithm_nearestNeigbors_spatialFootprints='brute',
         n_neighbors_nearestNeighbors_spatialFootprints='full',
         locality=1,
+        verbose=True,
         **kwargs_nearestNeigbors_spatialFootprints
     ):
         """
@@ -77,6 +85,8 @@ class ROI_graph:
         self._kwargs_sf = kwargs_nearestNeigbors_spatialFootprints
 
         self._locality = locality
+
+        self._verbose = verbose
 
         self.n_workers = mp.cpu_count() if n_workers == -1 else n_workers
 
@@ -167,6 +177,7 @@ class ROI_graph:
         # return u, idx, c
         self.cluster_idx = np.array(cluster_idx_all, dtype=object)[idx]
         self.cluster_bool = scipy.sparse.vstack([scipy.sparse.csr_matrix(helpers.idx2bool(cid, length=self.s.shape[0])) for cid in self.cluster_idx])
+        self.cluster_freq = c
 
         # return self.cluster_idx
 
@@ -296,7 +307,21 @@ class ROI_graph:
         return cluster_idx, cluster_freq
 
     
-    def _compute_cluster_similarity_graph(self, n_workers=None):
+    def _compute_cluster_similarity_graph(
+        self, 
+        cluster_similarity_reduction_intra='mean',
+        cluster_similarity_reduction_inter='max',
+        cluster_silhouette_reduction_intra='mean',
+        cluster_silhouette_reduction_inter='max',
+        n_workers=None,
+        ):
+
+        self._cluster_similarity_reduction_intra_method = cluster_similarity_reduction_intra
+        self._cluster_similarity_reduction_inter_method = cluster_similarity_reduction_inter
+
+        self._cluster_silhouette_reduction_intra_method = cluster_silhouette_reduction_intra
+        self._cluster_silhouette_reduction_inter_method = cluster_silhouette_reduction_inter
+
         if n_workers is None:
             n_workers = mp.cpu_count()
 
@@ -310,6 +335,7 @@ class ROI_graph:
         self.n_clusters = len(self.cluster_idx)
 
         ## make a sparse matrix of the spatial footprints of the sum of each cluster
+        print('Starting: Making cluster spatial footprints') if self._verbose else None
         self.spatialFootprints_coo = sparse.COO(self.sf_cat)
         self.clusterBool_coo = sparse.COO(self.cluster_bool)
         batch_size = int(max(1e8 // self.spatialFootprints_coo.shape[0], 1000))
@@ -317,15 +343,15 @@ class ROI_graph:
         self.sf_clusters = sparse.concatenate(
             helpers.simple_multithreading(
                 self._helper_make_sfClusters,
-                [
-                    helpers.make_batches(self.clusterBool_coo[:,:,None], batch_size=batch_size)
-                ],
+                [helpers.make_batches(self.clusterBool_coo[:,:,None], batch_size=batch_size)],
                 workers=n_workers
             )
         ).tocsr()
+        print('Completed: Making cluster spatial footprints') if self._verbose else None
 
-        self.c = scipy.sparse.csr_matrix((self.n_clusters, self.n_clusters))
-        self.c = scipy.sparse.lil_matrix((self.n_clusters, self.n_clusters))
+
+        print('Starting: Computing cluster similarities') if self._verbose else None
+        self.c_sim = scipy.sparse.lil_matrix((self.n_clusters, self.n_clusters))
         self.s_local = sparse.COO(self.s.power(self._locality))
         self._idxClusters_block = [np.where(self.sf_clusters[:, idx_pixels].sum(1) > 0)[0] for idx_pixels in self.idxPixels_block]  ## find indices of the clusters that have at least one non-zero pixel in the block
 
@@ -334,8 +360,26 @@ class ROI_graph:
             [np.arange(len(self.blocks))],
             workers=n_workers
         )
+        print('Completed: Computing cluster similarities') if self._verbose else None
 
-        return self.c
+
+        print('Starting: Computing modified cluster silhouettes') if self._verbose else None
+        
+        self._cluster_bool_coo = sparse.COO(self.cluster_bool)
+
+        self._cluster_bool_inv = sparse.COO(self.cluster_bool)
+        self._cluster_bool_inv.data = self._cluster_bool_inv.data < True
+        self._cluster_bool_inv.fill_value = True
+
+        self.c_sil = np.array([self._helper_cluster_silhouette(
+            idx, 
+            method_in=self._cluster_silhouette_reduction_intra_method,
+            method_out=self._cluster_silhouette_reduction_inter_method,
+        ) for idx in tqdm(range(self.n_clusters))])
+
+        print('Completed: Computing modified cluster silhouettes') if self._verbose else None
+
+
 
     def _helper_make_sfClusters(
         self,
@@ -349,94 +393,46 @@ class ROI_graph:
         i_block, 
     ):
         cBool = sparse.COO(self.cluster_bool[self._idxClusters_block[i_block]])
+        sizes_clusters = cBool.sum(1)
+
         cs_inter = (self.s_local[None,None,:,:] * cBool[:, None, :, None]) * cBool[None, :, None, :]  ## arranges similarities between every roi ACROSS every pair of clusters. shape (n_clusters, n_clusters, n_ROI, n_ROI)
-        c_block = fn_interSimilarity(cs_inter).todense()  ## compute the reduction of the cs_inter array along the ROI dimensions
+        c_block = reduction_inter(
+            x=cs_inter, 
+            sizes_clusters=sizes_clusters, 
+            method=self._cluster_similarity_reduction_inter_method,
+        ).todense()  ## compute the reduction of the cs_inter array along the ROI dimensions
 
         cs_intra = (self.s_local[None,:,:] * cBool[:, :, None]) * cBool[:, None, :]  ## arranges similarities between every roi WITHIN each cluster. shape (n_clusters, n_ROI, n_ROI)
-        c_block[range(c_block.shape[0]), range(c_block.shape[0])] = fn_intraSimilarity(cs_intra).todense()  ## compute the reduction of the cs_intra array along the ROI dimensions
+        c_block[range(c_block.shape[0]), range(c_block.shape[0])] = reduction_intra(
+            cs_intra, 
+            sizes_clusters=sizes_clusters,
+            method=self._cluster_similarity_reduction_intra_method,
+        ).todense()  ## compute the reduction of the cs_intra array along the ROI dimensions
 
         c_block = np.maximum(c_block, c_block.T)  # force symmetry
 
         idx = np.meshgrid(self._idxClusters_block[i_block], self._idxClusters_block[i_block])
-        self.c[idx[0], idx[1]] = c_block
+        self.c_sim[idx[0], idx[1]] = c_block
         return c_block
 
-
-    def silhouette_score(
+    def _helper_cluster_silhouette(
         self,
-        # s,
-        # h,
-        # locality=1,
-        # return_inAndOut=False,
-        method_inter='mean',
-        method_intra='max',
+        idx,
+        method_in='mean',
+        method_out='max',
     ):
-        """
-        Function to compute the aggregated silhouette score of clusters.
-        Here, the score measures the similarity between samples within
-        a cluster and between samples within a cluster and all other samples.
-        To compute a true silhouette score, use:
-        method_in='mean' and method_out='max'.
+        assert method_in in ['mean', 'min'], 'method_in must be mean or min'
+        assert method_out in ['max'], 'method_out must be max'
 
-        RH 2022
-
-        Args:
-            s (torch.Tensor, dtype float):
-                The similarity matrix.
-                shape: (n_samples, n_samples)
-            h (torch.Tensor, dtype bool):
-                The cluster membership matrix.
-                shape: (n_samples, n_clusters)
-            locality (float):
-                The exponent applied to the similarity matrix.
-                Higher values make the score more dependent on local 
-                similarity. 
-                Setting method_out to 'mean' and using a high locality 
-                value can result in something similar to a silhouette
-                score.
-            return_inAndOut (bool):
-                If True then the in and out scores are returned.
-
-        """
-
-        if h.dtype != torch.bool:
-            raise ValueError('h must be a boolean tensor.')
-
-        n_clusters = h.shape[1]
-        n_samples = h.shape[0]
-        
-        DEVICE = s.device
-        s_tu = (s**locality).type(torch.float32)
-        s_tu[torch.arange(n_samples).to(DEVICE), torch.arange(n_samples).to(DEVICE)] = torch.nan
-        h_tu = h.to(DEVICE)
-        
-        if method_intra == 'mean':
-            fn_mi = torch.nanmean
-        elif method_intra == 'max':
-            fn_mi = torch_helpers.nanmax
-        elif method_intra == 'min':
-            fn_mi = torch_helpers.nanmin
-        else:
-            raise ValueError('method_in must be one of "mean", "max", "min".')
-
-        if method_inter == 'mean':
-            fn_mo = torch.nanmean
-        elif method_inter == 'max':
-            fn_mo = torch_helpers.nanmax
-        elif method_inter == 'min':
-            fn_mo = torch_helpers.nanmin
-        else:
-            raise ValueError('method_out must be one of "mean", "max", "min".')
-            
-        cs_in  = torch.as_tensor([fn_mi(s_tu[h_tu[:,ii]][:, h_tu[:,ii]]) for ii in range(n_clusters)], device=DEVICE)
-        cs_out = torch.as_tensor([fn_mo(s_tu[h_tu[:,ii]][:,~h_tu[:,ii]]) for ii in range(n_clusters)], device=DEVICE)
-        
-        cs = cs_in / cs_out
-
-        if return_inAndOut:
-            return cs, cs_in, cs_out
-        else:
-            return cs
+        idx_in = self._cluster_bool_coo[idx].nonzero()[0]
+        s_single = self.s_local[idx_in]
+        if method_in == 'mean':
+            cs_in = s_single[:, idx_in].mean()
+        elif method_in == 'min':
+            cs_in = s_single[:, idx_in].min()
+        cs_out = (s_single * self._cluster_bool_inv[idx]).max()
+        # return cs_in / cs_out
+        return (cs_in - cs_out) / np.maximum(cs_in, cs_out)
 
 
 ###########################
@@ -447,7 +443,7 @@ class ROI_graph:
         self,
         frame_height=512,
         frame_width=1024,
-        block_height=100,
+        block_height=100, 
         block_width=100,
         overlapping_width_Multiplier=0.2,
         outer_block_height=None,
@@ -548,14 +544,15 @@ def hash_matrix(x):
     y = np.array(np.packbits(x.todense(), axis=1))
     return np.array([hash(tuple(vec)) for vec in y])
 
-def fn_interSimilarity(x, method='max'):
+def reduction_inter(x, sizes_clusters, method='max'):
     if method == 'max':
         return x.max(axis=(2,3))
-    # elif method == 'mean':
-    #     return x.sum(axis=(2,3)) / ( (torch.eye(x.shape[0]).to(DEVICE) * ii_normFactor(sizes_clusters)) + ((1-torch.eye(x.shape[0]).to(DEVICE)) * (sizes_clusters[None,:] * sizes_clusters[:,None])) )
+    elif method == 'mean':
+        return x.sum(axis=(2,3)) / (sizes_clusters[:,None] * sizes_clusters[None,:])
 
-def fn_intraSimilarity(x, method='min'):
+def reduction_intra(x, sizes_clusters, method='min'):
     if method == 'min':
         x.fill_value = np.inf
         return x.min(axis=(1,2))
-    # elif method == 'mean':
+    elif method == 'mean':
+        return x.sum(axis=(1,2)) / (sizes_clusters * (sizes_clusters-1))
