@@ -42,7 +42,7 @@ class Data_suite2p:
 
         self.statFiles = None
 
-        self.verbose = verbose
+        self._verbose = verbose
 
 
     def import_statFiles(self):
@@ -60,7 +60,7 @@ class Data_suite2p:
         self.n_roi = [len(stat) for stat in self.statFiles]
         self.n_roi_total = sum(self.n_roi)
 
-        if self.verbose:
+        if self._verbose:
             print(f"Imported {len(self.statFiles)} stat files into class as self.statFiles. Total number of ROIs: {self.n_roi_total}. Number of ROI from each file: {self.n_roi}")
 
         return self.statFiles
@@ -101,7 +101,7 @@ class Data_suite2p:
         """
 
         if images is not None:
-            if self.verbose:
+            if self._verbose:
                 print("Using provided images for FOV_images.")
             self.FOV_images = images
 
@@ -110,7 +110,7 @@ class Data_suite2p:
                 raise ValueError("'path_ops' must be defined in initialization if 'images' is not provided.")
             self.FOV_images = np.array([np.load(path, allow_pickle=True)[()][type_meanImg] for path in self.paths_ops])
 
-            if self.verbose:
+            if self._verbose:
                 print(f"Imported {len(self.FOV_images)} FOV images into class as self.FOV_images")
 
         self.FOV_height = self.FOV_images[0].shape[0]
@@ -177,7 +177,7 @@ class Data_suite2p:
 
         self.ROI_images = self._convert_stat_to_centeredImages(statFiles=statFiles)
         
-        if self.verbose:
+        if self._verbose:
             print(f"Converted {len(self.ROI_images)} spatial footprint files into small centered images in self.ROI_images.")
         
         return self.ROI_images
@@ -237,8 +237,8 @@ class Data_suite2p:
 
         self.sessionID_concat = np.vstack([np.array([helpers.idx2bool(i_sesh, length=len(self.spatialFootprints))]*sesh.shape[0]) for i_sesh, sesh in enumerate(self.spatialFootprints)])
 
-        if self.verbose:
-            print(f"Imported {len(self.spatialFootprints)} spatial footprints into sparse arrays.")
+        if self._verbose:
+            print(f"Imported {len(self.spatialFootprints)} sessions of spatial footprints into sparse arrays.")
 
         return self.spatialFootprints
 

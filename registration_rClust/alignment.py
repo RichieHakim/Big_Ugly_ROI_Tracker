@@ -30,8 +30,8 @@ class Alinger:
                  required arguments.
                 If None, hard-coded defaults will be used.
         """
-        self.method = method
-        self.kwargs_method = kwargs_method
+        self._method = method
+        self._kwargs_method = kwargs_method
 
     def register_ROIs(
         self,
@@ -63,9 +63,9 @@ class Alinger:
         self.ROIs_aligned, self.FOVs_aligned, self.flows = [], [], []
         for ii in tqdm(range(len(FOVs))):
 
-            if self.method == 'calcOpticalFlowFarneback':
-                if self.kwargs_method is None:
-                    self.kwargs_method = {
+            if self._method == 'calcOpticalFlowFarneback':
+                if self._kwargs_method is None:
+                    self._kwargs_method = {
                         'pyr_scale': 0.3, 
                         'levels': 3,
                         'winsize': 128, 
@@ -78,10 +78,10 @@ class Alinger:
                     prev=template_norm,
                     next=FOVs_norm[ii], 
                     flow=None, 
-                    **self.kwargs_method,
+                    **self._kwargs_method,
                 )
         
-            elif self.method == 'createOptFlow_DeepFlow':
+            elif self._method == 'createOptFlow_DeepFlow':
                 flow = cv2.optflow.createOptFlow_DeepFlow().calc(
                     template_norm,
                     FOVs_norm[ii],
