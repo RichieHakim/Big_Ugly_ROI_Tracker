@@ -217,7 +217,7 @@ class ROI_graph:
         )
 
         ## Dump the results to object attributes
-        self.cluster_idx = np.array(cluster_idx_all, dtype=np.int64)[idx]
+        self.cluster_idx = np.array(cluster_idx_all, dtype=object)[idx]
         self.cluster_bool = scipy.sparse.vstack([scipy.sparse.csr_matrix(helpers.idx2bool(cid, length=self.s.shape[0])) for cid in self.cluster_idx])
 
 
