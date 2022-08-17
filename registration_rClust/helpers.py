@@ -216,7 +216,15 @@ def scipy_sparse_to_torch_coo(sp_array, dtype=None):
 
 
 def torch_to_torchSparse(s):
-    return torch_sparse.from_forch_sparse(s)
+    import torch_sparse
+
+    return torch_sparse.tensor.SparseTensor(
+        row=s.indices()[0],
+        col=s.indices()[1],
+        value=s.values(),
+        sparse_sizes=s.shape,
+    )
+
 
 def pydata_sparse_to_torch_coo(sp_array):
     coo = sparse.COO(sp_array)
@@ -231,5 +239,27 @@ def pydata_sparse_to_torch_coo(sp_array):
     return torch.sparse_coo_tensor(i, v, torch.Size(shape))
 
 
-def pydata_sparse_to_torchSparse(s, shape=None):
+def pydata_sparse_to_torchSparse(s):
     return torch_sparse.from_torch_sparse(pydata_sparse_to_torch_coo(s).coalesce())
+
+
+
+def diag_sparse(x, return_sparse_vals=True):
+    """
+    Get the diagonal of a sparse tensor.
+    RH 2022
+
+    Args:
+        x (torch.sparse.FloatTensor):
+            Pytorch sparse tensor.
+        return_sparse_vals (bool):
+            If True, returns 'sparse' (zeroed) values as well.
+            If False, returns only specified (non-sparsed out) values.
+    """
+    if return_sparse_vals is False:
+        row, col = x.indices()
+        values = x.values()
+        return values[row == col]
+    else:
+        x_ts = torch_to_torchSparse(x)
+        return x_ts.get_diag()

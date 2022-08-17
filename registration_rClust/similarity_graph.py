@@ -133,7 +133,6 @@ class ROI_graph:
         self.s = scipy.sparse.csr_matrix((n_roi, n_roi))
         s_empty = scipy.sparse.lil_matrix((n_roi, n_roi))
         self.d = scipy.sparse.csr_matrix((n_roi, n_roi))
-        d_empty = scipy.sparse.lil_matrix((n_roi, n_roi))
         cluster_idx_all = []
 
         self.idxPixels_block = []
@@ -143,6 +142,7 @@ class ROI_graph:
             idx_tmp = np.where(idx_tmp.reshape(-1))[0]
             self.idxPixels_block.append(idx_tmp)
 
+        # for ii, block in tqdm(enumerate(self.blocks), total=len(self.blocks)):
         for ii, block in tqdm(enumerate(self.blocks), total=len(self.blocks)):
             idxROI_block = np.where(self.sf_cat[:, self.idxPixels_block[ii]].sum(1) > 0)[0]
 
@@ -162,10 +162,12 @@ class ROI_graph:
             d_block[range(d_block.shape[0]), range(d_block.shape[0])] = 0
             d_block[torch.isinf(d_block).type(torch.bool)] = 1e10  ## convert inf
 
-            cluster_idx_block__idxBlock, cluster_freq_block =  self._compute_linkage_clusters(d_block.numpy())
-            cluster_idx_block = [idxROI_block[idx] for idx in cluster_idx_block__idxBlock]
+            ## if d_block.shape[0] is 1 or 0, then there aren't enough samples in the block to find clusters
+            if d_block.shape[0] > 1:
+                cluster_idx_block__idxBlock, cluster_freq_block =  self._compute_linkage_clusters(d_block.numpy())
+                cluster_idx_block = [idxROI_block[idx] for idx in cluster_idx_block__idxBlock]
 
-            cluster_idx_all += cluster_idx_block
+                cluster_idx_all += cluster_idx_block
         # return cluster_idx_all
 
         u, idx, c = np.unique(
@@ -175,9 +177,8 @@ class ROI_graph:
         )
 
         # return u, idx, c
-        self.cluster_idx = np.array(cluster_idx_all, dtype=object)[idx]
+        self.cluster_idx = np.array(cluster_idx_all, dtype=np.int64)[idx]
         self.cluster_bool = scipy.sparse.vstack([scipy.sparse.csr_matrix(helpers.idx2bool(cid, length=self.s.shape[0])) for cid in self.cluster_idx])
-        self.cluster_freq = c
 
         # return self.cluster_idx
 
@@ -272,8 +273,13 @@ class ROI_graph:
 
         print(f'Starting: clustering') if verbose else None
         cluster_bool_all = []
+        # print(self.links)
         for ii, t in enumerate(self._linkage_distances):
-            [cluster_bool_all.append(scipy.sparse.csr_matrix(labels_to_bool(scipy.cluster.hierarchy.fcluster(self.links[method], t=t, criterion='distance')))) for method in self._linkage_methods]
+            [cluster_bool_all.append(self._helper_get_boolean_clusters_from_linkages(self.links[method], t=t, criterion='distance')) for method in self._linkage_methods]
+            # [cluster_bool_all.append(scipy.sparse.csr_matrix(labels_to_bool(scipy.cluster.hierarchy.fcluster(self.links[method], t=t, criterion='distance')))) for method in self._linkage_methods]
+            # print([self._helper_get_boolean_clusters_from_linkages(self.links[method], t=t, criterion='distance') for method in self._linkage_methods])
+        
+        # print(cluster_bool_all)
         cluster_bool_all = scipy.sparse.vstack(cluster_bool_all)
         print(f'Completed: clustering') if verbose else None
 
@@ -285,6 +291,15 @@ class ROI_graph:
         cluster_idx, cluster_freq = self._get_unique_clusters(cluster_bool_all[idx_clusters_inRange])
 
         return cluster_idx, cluster_freq
+
+    def _helper_get_boolean_clusters_from_linkages(self, links, t, criterion='distance'):
+        ## if there aren't enough links to make a cluster, return an empty matrix
+        # if links.ndim == 1:
+        # # if False:
+        #     return []
+        # else:
+        return scipy.sparse.csr_matrix(labels_to_bool(scipy.cluster.hierarchy.fcluster(links, t=t, criterion=criterion)))
+
 
 
     def _get_unique_clusters(
@@ -538,7 +553,10 @@ def labels_to_bool(labels):
 
 def helper_compute_linkage(method, d_sq):
     # print(f'computing method: {method}')
-    return {method : scipy.cluster.hierarchy.linkage(d_sq, method=method)}
+    if len(d_sq) > 0:
+        return {method : scipy.cluster.hierarchy.linkage(d_sq, method=method)}
+    else:
+        return {method : np.array([])}
 
 def hash_matrix(x):
     y = np.array(np.packbits(x.todense(), axis=1))
