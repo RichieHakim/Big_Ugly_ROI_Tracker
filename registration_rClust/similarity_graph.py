@@ -665,7 +665,7 @@ class ROI_graph:
                     list(np.int64([centers_x[i_x] - block_width_half , centers_x[i_x] + block_width_half]))
                 ])
                                 
-        # clamp outer block to limits of frame
+        # clamp block to limits of frame
         if clamp_blocks_to_frame:
             for ii, block in enumerate(blocks):
                 br_h = np.array(block[0]) # block range height
@@ -688,9 +688,7 @@ class ROI_graph:
         """
         im = np.zeros((self._frame_height, self._frame_width, 3))
         for block in self.blocks:
-            im[block[0][0]:block[0][1], block[1][0]:block[1][1], 0] += 0.2
-        for block in self.outer_blocks:
-            im[block[0][0]:block[0][1], block[1][0]:block[1][1], 1] += 0.2
+            im[block[0][0]:block[0][1], block[1][0]:block[1][1], :] += 0.2
         plt.figure()
         plt.imshow(im)
 
