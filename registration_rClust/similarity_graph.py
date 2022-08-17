@@ -93,14 +93,12 @@ class ROI_graph:
         self._frame_height = frame_height
         self._frame_width = frame_width
 
-        self.blocks, self.outer_blocks, (self._centers_y, self._centers_x) = self._make_block_batches(
+        self.blocks, (self._centers_y, self._centers_x) = self._make_block_batches(
             frame_height=frame_height,
             frame_width=frame_width,
             block_height=block_height,
             block_width=block_width,
             overlapping_width_Multiplier=overlapping_width_Multiplier,
-            block_height=block_height,
-            block_width=block_width,
             clamp_blocks_to_frame=True,
         )
 
@@ -659,32 +657,27 @@ class ROI_graph:
         )
         
         # make blocks
-        blocks, outer_blocks = [], []
+        blocks = []
         for i_x in range(n_blocks_x):
             for i_y in range(n_blocks_y):
                 blocks.append([
                     list(np.int64([centers_y[i_y] - block_height_half , centers_y[i_y] + block_height_half])),
                     list(np.int64([centers_x[i_x] - block_width_half , centers_x[i_x] + block_width_half]))
                 ])
-                
-                outer_blocks.append([
-                    list(np.int64([centers_y[i_y] - block_height_half , centers_y[i_y] + block_height_half])),
-                    list(np.int64([centers_x[i_x] - block_width_half , centers_x[i_x] + block_width_half]))                
-                ])
-                
+                                
         # clamp outer block to limits of frame
         if clamp_blocks_to_frame:
-            for ii, outer_block in enumerate(outer_blocks):
-                br_h = np.array(outer_block[0]) # block range height
-                br_w = np.array(outer_block[1]) # block range width
+            for ii, block in enumerate(blocks):
+                br_h = np.array(block[0]) # block range height
+                br_w = np.array(block[1]) # block range width
                 valid_h = (br_h>0) * (br_h<frame_height)
                 valid_w = (br_w>0) * (br_w<frame_width)
-                outer_blocks[ii] = [
+                blocks[ii] = [
                     list( (br_h * valid_h) + (np.array([0, frame_height])*np.logical_not(valid_h)) ),
                     list( (br_w * valid_w) + (np.array([0, frame_width])*np.logical_not(valid_w)) ),            
                 ]
             
-        return blocks, outer_blocks, (centers_y, centers_x)
+        return blocks, (centers_y, centers_x)
 
 
     def visualize_blocks(
