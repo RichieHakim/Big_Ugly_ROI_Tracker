@@ -180,7 +180,7 @@ class ROI_graph:
         self.d = scipy.sparse.csr_matrix((n_roi, n_roi))
         cluster_idx_all = []
 
-        # for ii, block in tqdm(enumerate(self.blocks), total=len(self.blocks)):
+        print('Computing pairwise similarity between ROIs...') if self._verbose else None
         for ii, block in tqdm(enumerate(self.blocks), total=len(self.blocks)):
             idxROI_block = np.where(self.sf_cat[:, self.idxPixels_block[ii]].sum(1) > 0)[0]
             
@@ -209,6 +209,7 @@ class ROI_graph:
                 cluster_idx_all += cluster_idx_block # accumulate the cluster indices (idx of rois in each cluster) for all blocks
 
         ## remove duplicate clusters by hashing each cluster's indices and calling np.unique on the hashes
+        print(f'Removing duplicate clusters...') if self._verbose else None
         u, idx, c = np.unique(
             ar=np.array([hash(tuple(vec)) for vec in cluster_idx_all]),
             return_index=True,
@@ -429,24 +430,14 @@ class ROI_graph:
         """
 
         d_sq = scipy.spatial.distance.squareform(d)
-        print(f'Starting: computing linkage') if self._verbose else None
-        # self.links = helpers.merge_dicts(helpers.simple_multiprocessing(helper_compute_linkage, (self._linkage_methods, [d_sq]*len(self._linkage_methods)), workers=self._n_workers))
         self.links = helpers.merge_dicts([helper_compute_linkage(method, d_sq) for method in self._linkage_methods])
-        print(f'Completed: computing linkage') if self._verbose else None
 
-        print(f'Starting: clustering') if self._verbose else None
         cluster_bool_all = []
-        # print(self.links)
         for ii, t in enumerate(self._linkage_distances):
             [cluster_bool_all.append(self._helper_get_boolean_clusters_from_linkages(self.links[method], t=t, criterion='distance')) for method in self._linkage_methods]
-            # [cluster_bool_all.append(scipy.sparse.csr_matrix(labels_to_bool(scipy.cluster.hierarchy.fcluster(self.links[method], t=t, criterion='distance')))) for method in self._linkage_methods]
-            # print([self._helper_get_boolean_clusters_from_linkages(self.links[method], t=t, criterion='distance') for method in self._linkage_methods])
         
-        # print(cluster_bool_all)
         cluster_bool_all = scipy.sparse.vstack(cluster_bool_all)
-        print(f'Completed: clustering') if self._verbose else None
 
-        print(f'Starting: filtering clusters by size removing redundant clusters') if self._verbose else None
         max_cluster_size = self._n_sessions if self._max_cluster_size is None else self._max_cluster_size
         nROIperCluster = np.array(cluster_bool_all.sum(1)).squeeze()
         idx_clusters_inRange = np.where( (nROIperCluster >= self._min_cluster_size) & (nROIperCluster <= max_cluster_size) )[0]
