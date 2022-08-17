@@ -263,3 +263,112 @@ def diag_sparse(x, return_sparse_vals=True):
     else:
         x_ts = torch_to_torchSparse(x)
         return x_ts.get_diag()
+
+
+def squeeze_integers(intVec):
+    """
+    Make integers in an array consecutive numbers
+     starting from 0. ie. [7,2,7,4,1] -> [3,2,3,1,0].
+    Useful for removing unused class IDs from y_true
+     and outputting something appropriate for softmax.
+    This is v2. The old version is busted.
+    RH 2021
+    
+    Args:
+        intVec (np.ndarray):
+            1-D array of integers.
+    
+    Returns:
+        intVec_squeezed (np.ndarray):
+            1-D array of integers with consecutive numbers
+    """
+    uniques = np.unique(intVec)
+    # unique_positions = np.arange(len(uniques))
+    unique_positions = np.arange(uniques.min(), uniques.max()+1)
+    return unique_positions[np.array([np.where(intVec[ii]==uniques)[0] for ii in range(len(intVec))]).squeeze()]
+
+
+def idx_to_oneHot(arr, n_classes=None):
+    """
+    Convert an array of class indices to matrix of
+     one-hot vectors.
+    RH 2021
+
+    Args:
+        arr (np.ndarray):
+            1-D array of class indices.
+        n_classes (int):
+            Number of classes.
+    
+    Returns:
+        oneHot (np.ndarray):
+            2-D array of one-hot vectors.
+    """
+    if n_classes is None:
+        n_classes = np.max(arr)+1
+    oneHot = np.zeros((arr.size, n_classes))
+    oneHot[np.arange(arr.size), arr] = 1
+    return oneHot
+
+    
+#########################
+# visualization helpers #
+#########################
+
+def rand_cmap(
+    nlabels, 
+    first_color_black=False, 
+    last_color_black=False,
+    verbose=True,
+    under=[0,0,0],
+    over=[0.5,0.5,0.5],
+    bad=[0.9,0.9,0.9],
+    ):
+    """
+    Creates a random colormap to be used together with matplotlib. Useful for segmentation tasks
+    :param nlabels: Number of labels (size of colormap)
+    :param type: 'bright' for strong colors, 'soft' for pastel colors
+    :param first_color_black: Option to use first color as black, True or False
+    :param last_color_black: Option to use last color as black, True or False
+    :param verbose: Prints the number of labels and shows the colormap. True or False
+    :return: colormap for matplotlib
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+    import matplotlib.pyplot as plt
+    import colorsys
+    import numpy as np
+
+
+
+    if verbose:
+        print('Number of labels: ' + str(nlabels))
+
+    randRGBcolors = np.random.rand(nlabels, 3)
+    randRGBcolors = randRGBcolors / np.max(randRGBcolors, axis=1, keepdims=True)
+
+    if first_color_black:
+        randRGBcolors[0] = [0, 0, 0]
+
+    if last_color_black:
+        randRGBcolors[-1] = [0, 0, 0]
+
+    random_colormap = LinearSegmentedColormap.from_list('new_map', randRGBcolors, N=nlabels)
+
+    # Display colorbar
+    if verbose:
+        from matplotlib import colors, colorbar
+        fig, ax = plt.subplots(1, 1, figsize=(6, 0.5))
+
+        bounds = np.linspace(0, nlabels, nlabels + 1)
+        norm = colors.BoundaryNorm(bounds, nlabels)
+
+        cb = colorbar.ColorbarBase(ax, cmap=random_colormap, norm=norm, spacing='proportional', ticks=None,
+                                   boundaries=bounds, format='%1i', orientation=u'horizontal')
+
+    random_colormap.set_bad(bad)
+    random_colormap.set_over(over)
+    random_colormap.set_under(under)
+
+    return random_colormap
+
+

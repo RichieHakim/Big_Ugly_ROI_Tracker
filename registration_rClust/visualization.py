@@ -1,6 +1,14 @@
 import matplotlib.pyplot as plt
 from ipywidgets import interact, widgets
 
+import numpy as np
+import sparse
+import scipy.sparse
+
+import copy
+
+from . import helpers
+
 def display_toggle_image_stack(images, clim=None):
 
     fig = plt.figure()
@@ -33,3 +41,56 @@ def display_toggle_2channel_image_stack(images, clim=None):
 
     interact(update, i_frame=widgets.IntSlider(min=0, max=len(images)-1, step=1, value=0));
 
+
+def compute_colored_FOV(
+    spatialFootprints,
+    FOV_height,
+    FOV_width,
+    preds,
+    confidence=None
+):
+
+    if confidence is None:
+        confidence = np.ones(len(preds))
+    
+    idx_roi_cat = np.concatenate([np.arange(sfs.shape[0]) for sfs in spatialFootprints]) # indices of each ROI concatenated together
+    idx_roi_session = np.concatenate([np.ones(sfs.shape[0])*ii for ii,sfs in enumerate(spatialFootprints)])
+
+    n_sessions = len(spatialFootprints)
+
+    n_planes = n_sessions
+    labels = helpers.squeeze_integers(preds.numpy().astype(np.int64))
+
+    labels[(confidence < 0.5)] = -1
+    # labels = labels
+
+    ucid_toUse = labels
+    idx_roi_session_toUse = idx_roi_session
+
+    colors = sparse.COO(helpers.rand_cmap(len(np.unique(ucid_toUse)), verbose=False)(np.int64(ucid_toUse))[:,:3])
+    # colors *= (1-((scores_samples / scores_samples.max()).numpy())**7)[:,None]
+    # colors *= (((1/scores_samples) / (1/scores_samples).max()).numpy()**1)[:,None]
+
+    plane_oneHot = helpers.idx_to_oneHot(idx_roi_session_toUse.astype(np.int32))
+
+    ROIs_csr = scipy.sparse.csr_matrix(scipy.sparse.vstack(spatialFootprints))
+    ROIs_csr_scaled = ROIs_csr.multiply(ROIs_csr.max(1).power(-1))
+    ROIs_sCOO = sparse.COO(ROIs_csr_scaled)
+
+    def tile_sparse(arr, n_tiles):
+        """
+        tiles along new (last) dimension
+        """
+        out = sparse.stack([arr for _ in range(n_tiles)], axis=-1)
+        return out
+
+    ROIs_tiled = tile_sparse(tile_sparse(ROIs_sCOO, n_planes), 3)
+
+    ROIs_colored = ROIs_tiled * colors[:,None,None,:] * plane_oneHot[:,None,:,None]
+
+    FOV_ROIs_colored = ROIs_colored.sum(0).reshape((FOV_height, FOV_width, n_planes, 3)).transpose((2,0,1,3))
+
+    FOV_all_noClip = copy.copy(FOV_ROIs_colored.todense())
+    FOV_all_noClip[FOV_all_noClip>1] = 1
+
+    return FOV_all_noClip

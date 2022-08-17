@@ -41,8 +41,6 @@ class ROI_graph:
         block_height=100,
         block_width=100,
         overlapping_width_Multiplier=0.2,
-        outer_block_height=None,
-        outer_block_width=None,
         algorithm_nearestNeigbors_spatialFootprints='brute',
         n_neighbors_nearestNeighbors_spatialFootprints='full',
         locality=1,
@@ -51,6 +49,8 @@ class ROI_graph:
     ):
         """
         Initialize the class.
+        Makes blocks of the field of view so that subsequent 
+         computations can be done blockwise.
 
         Args:
             device (str):
@@ -88,10 +88,10 @@ class ROI_graph:
 
         self._verbose = verbose
 
-        self.n_workers = mp.cpu_count() if n_workers == -1 else n_workers
+        self._n_workers = mp.cpu_count() if n_workers == -1 else n_workers
 
-        self.frame_height = frame_height
-        self.frame_width = frame_width
+        self._frame_height = frame_height
+        self._frame_width = frame_width
 
         self.blocks, self.outer_blocks, (self._centers_y, self._centers_x) = self._make_block_batches(
             frame_height=frame_height,
@@ -99,13 +99,21 @@ class ROI_graph:
             block_height=block_height,
             block_width=block_width,
             overlapping_width_Multiplier=overlapping_width_Multiplier,
-            outer_block_height=outer_block_height,
-            outer_block_width=outer_block_width,
-            clamp_outer_block_to_frame=True,
+            block_height=block_height,
+            block_width=block_width,
+            clamp_blocks_to_frame=True,
         )
 
+        self.idxPixels_block = []
+        for block in self.blocks:
+            idx_tmp = np.zeros((self._frame_height, self._frame_width), dtype=np.bool8)
+            idx_tmp[block[0][0]:block[0][1], block[1][0]:block[1][1]] = True
+            idx_tmp = np.where(idx_tmp.reshape(-1))[0]
+            self.idxPixels_block.append(idx_tmp)
 
-    def _compute_similarity_blockwise(
+
+
+    def compute_similarity_blockwise(
         self,
         spatialFootprints,
         features_NN,
@@ -117,6 +125,45 @@ class ROI_graph:
         max_cluster_size=None,
         batch_size_hashing=100,
     ):
+        """
+        Computes:
+            1. The similarity graph between ROIs. This generates
+             self.s, which is the pairwise similarity matrix of 
+             shape (n_ROIs, n_ROIs).
+            2. Generates clusters. This generates self.cluster_bool,
+             and self.cluster_idx. These describe the which ROIs 
+             are in which clusters.
+
+        Args:
+            spatialFootprints (scipy.sparse.csr_matrix):
+                The spatial footprints of the ROIs.
+                Can be obtained from blurring.ROI_blurrer.ROIs_blurred
+                 or data_importing.Data_suite2p.spatialFootprints.
+            features_NN (torch.Tensor):
+                The output latents from the roinet neural network.
+                Can be obtained from ROInet.ROInet_embedder.latents
+            features_SWT (torch.Tensor):
+                The output latents from the scattering wavelet transform.
+                Can be obtained from scatteringWaveletTransform.SWT.latents
+            ROI_session_bool (torch.Tensor):
+                The boolean array indicating which ROIs (across all sessions)
+                 belong to each session. shape (n_ROIs total, n_sessions)
+            linkage_methods (list of str):
+                The linkage methods to use for the linkage clustering.
+                See scipy.cluster.hierarchy.linkage for more information.
+            linkage_distances (list of float):
+                The distances to use for the linkage clustering.
+                Using more will result in higher resolution results, but slower
+                 computation.
+                See scipy.cluster.hierarchy.linkage for more information.
+            min_cluster_size (int):
+                The minimum size of a cluster to consider.
+            max_cluster_size (int):
+                The maximum size of a cluster to consider.
+                If None, all clusters with size <= n_sessions are considered.
+            batch_size_hashing (int):
+                The number of ROIs to hash at a time.
+        """
 
         self._n_sessions = len(spatialFootprints)
 
@@ -135,57 +182,167 @@ class ROI_graph:
         self.d = scipy.sparse.csr_matrix((n_roi, n_roi))
         cluster_idx_all = []
 
-        self.idxPixels_block = []
-        for block in self.blocks:
-            idx_tmp = np.zeros((self.frame_height, self.frame_width), dtype=np.bool8)
-            idx_tmp[block[0][0]:block[0][1], block[1][0]:block[1][1]] = True
-            idx_tmp = np.where(idx_tmp.reshape(-1))[0]
-            self.idxPixels_block.append(idx_tmp)
-
         # for ii, block in tqdm(enumerate(self.blocks), total=len(self.blocks)):
         for ii, block in tqdm(enumerate(self.blocks), total=len(self.blocks)):
             idxROI_block = np.where(self.sf_cat[:, self.idxPixels_block[ii]].sum(1) > 0)[0]
-
-            s_block = self._compute_ROI_similarity_graph(
+            
+            ## Compute pairwise similarity matrix
+            s_block = self._helper_compute_ROI_similarity_graph(
                 spatialFootprints=self.sf_cat[idxROI_block][:, self.idxPixels_block[ii]].power(self._sf_maskPower),
                 features_NN=features_NN[idxROI_block],
                 features_SWT=features_SWT[idxROI_block],
                 ROI_session_bool=ROI_session_bool[idxROI_block],
             )
             s_block = torch.maximum(s_block, s_block.T)  # force symmetry
-            idx = np.meshgrid(idxROI_block, idxROI_block)
-            s_tmp = copy.copy(s_empty)
-            s_tmp[idx[0], idx[1]] = s_block
-            self.s = self.s.maximum(s_tmp)
+            idx = np.meshgrid(idxROI_block, idxROI_block) # get ij indices for rois in this block for s_block
+            s_tmp = copy.copy(s_empty) # preallocate a sparse matrix of the full size s matrix
+            s_tmp[idx[0], idx[1]] = s_block # fil in the full size s matrix with the block s matrix
+            self.s = self.s.maximum(s_tmp) # accumulate the final s matrix with the values from this block
 
-            d_block = 1 / s_block
-            d_block[range(d_block.shape[0]), range(d_block.shape[0])] = 0
-            d_block[torch.isinf(d_block).type(torch.bool)] = 1e10  ## convert inf
+            ### make a distance matrix for the clustering step
+            d_block = 1 / s_block 
+            d_block[range(d_block.shape[0]), range(d_block.shape[0])] = 0 # set diagonal to 0
+            d_block[torch.isinf(d_block).type(torch.bool)] = 1e10  ## convert inf to a large number
 
-            ## if d_block.shape[0] is 1 or 0, then there aren't enough samples in the block to find clusters
-            if d_block.shape[0] > 1:
-                cluster_idx_block__idxBlock, cluster_freq_block =  self._compute_linkage_clusters(d_block.numpy())
-                cluster_idx_block = [idxROI_block[idx] for idx in cluster_idx_block__idxBlock]
+            if d_block.shape[0] > 1: # if d_block.shape[0] is 1 or 0, then there aren't enough samples in the block to find clusters
+                cluster_idx_block__idxBlock, cluster_freq_block =  self._helper_compute_linkage_clusters(d_block.numpy()) # compute clusters for this block
+                cluster_idx_block = [idxROI_block[idx] for idx in cluster_idx_block__idxBlock] # convert from block indices to full indices
 
-                cluster_idx_all += cluster_idx_block
-        # return cluster_idx_all
+                cluster_idx_all += cluster_idx_block # accumulate the cluster indices (idx of rois in each cluster) for all blocks
 
+        ## remove duplicate clusters by hashing each cluster's indices and calling np.unique on the hashes
         u, idx, c = np.unique(
             ar=np.array([hash(tuple(vec)) for vec in cluster_idx_all]),
             return_index=True,
             return_counts=True,
         )
 
-        # return u, idx, c
+        ## Dump the results to object attributes
         self.cluster_idx = np.array(cluster_idx_all, dtype=np.int64)[idx]
         self.cluster_bool = scipy.sparse.vstack([scipy.sparse.csr_matrix(helpers.idx2bool(cid, length=self.s.shape[0])) for cid in self.cluster_idx])
 
-        # return self.cluster_idx
 
-        # print([sf_cat[idx].sum(0) for idx in self.cluster_idx])
+    def compute_cluster_similarity_graph(
+        self, 
+        cluster_similarity_reduction_intra='mean',
+        cluster_similarity_reduction_inter='max',
+        cluster_silhouette_reduction_intra='mean',
+        cluster_silhouette_reduction_inter='max',
+        n_workers=None,
+    ):
+        """
+        Computers the similarity graph between clusters.
+        Similarly to 'compute_similarity_blockwise', this function 
+         operates over blocks, but computes the similarity between
+         clusters as opposed to ROIs.
+        
+        Args:
+            cluster_similarity_reduction_intra (str):
+                The method to use for reducing the intra-cluster similarity.
+            cluster_similarity_reduction_inter (str):
+                The method to use for reducing the inter-cluster similarity.
+            cluster_silhouette_reduction_intra (str):
+                The method to use for reducing the intra-cluster silhouette.
+            cluster_silhouette_reduction_inter (str):
+                The method to use for reducing the inter-cluster silhouette.
+
+        Attributes set:
+            self.n_clusters (int):
+                The number of clusters.
+            self.sf_clusters (scipy.sparse.csr_matrix):
+                The spatial fooprints of the sum of the rois in each cluster
+                 (summed over ROIs).
+            self.c_sim (scipy.sparse.csr_matrix):
+                The similarity matrix between clusters.
+            self.c_sil (np.ndarray):
+                The silhouette score for each cluster
+            self.s_local (scipy.sparse.csr_matrix):
+                The 'local' version of self.s, where s_local = s**locality.
+        """
+
+        self._cluster_similarity_reduction_intra_method = cluster_similarity_reduction_intra
+        self._cluster_similarity_reduction_inter_method = cluster_similarity_reduction_inter
+
+        self._cluster_silhouette_reduction_intra_method = cluster_silhouette_reduction_intra
+        self._cluster_silhouette_reduction_inter_method = cluster_silhouette_reduction_inter
+
+        if n_workers is None:
+            n_workers = mp.cpu_count()
+
+        self.n_clusters = len(self.cluster_idx)
+
+        ## make a sparse matrix of the spatial footprints of the sum of each cluster
+        print('Starting: Making cluster spatial footprints') if self._verbose else None
+        self.spatialFootprints_coo = sparse.COO(self.sf_cat)
+        self.clusterBool_coo = sparse.COO(self.cluster_bool)
+        batch_size = int(max(1e8 // self.spatialFootprints_coo.shape[0], 1000))
+
+        ## make images of each cluster (so that we can determine which ones are in which block)
+        self.sf_clusters = sparse.concatenate(
+            helpers.simple_multithreading(
+                self._helper_make_sfClusters,
+                [helpers.make_batches(self.clusterBool_coo[:,:,None], batch_size=batch_size)],
+                workers=n_workers
+            )
+        ).tocsr()
+        print('Completed: Making cluster spatial footprints') if self._verbose else None
 
 
-    def _compute_ROI_similarity_graph(
+        print('Starting: Computing cluster similarities') if self._verbose else None
+        self.c_sim = scipy.sparse.lil_matrix((self.n_clusters, self.n_clusters)) # preallocate a sparse matrix for the cluster similarity matrix
+        self.s_local = sparse.COO(self.s.power(self._locality))
+        self._idxClusters_block = [np.where(self.sf_clusters[:, idx_pixels].sum(1) > 0)[0] for idx_pixels in self.idxPixels_block]  ## find indices of the clusters that have at least one non-zero pixel in the block
+
+        ## compute the similarity between clusters. self.c_sim is updated from within the helper function
+        helpers.simple_multithreading(
+            self._helper_compute_cluster_similarity_batch,
+            [np.arange(len(self.blocks))],
+            workers=n_workers
+        )
+        print('Completed: Computing cluster similarities') if self._verbose else None
+
+
+        print('Starting: Computing modified cluster silhouettes') if self._verbose else None
+        ## below are used in the helper function for the silhouette score
+        self._cluster_bool_coo = sparse.COO(self.cluster_bool) # sparse.COO objects can be used for indexing
+        self._cluster_bool_inv = sparse.COO(self.cluster_bool) 
+        self._cluster_bool_inv.data = self._cluster_bool_inv.data < True
+        self._cluster_bool_inv.fill_value = True
+        ## compute the silhouette score for each cluster. self.c_sil is updated from within the helper function
+        self.c_sil = np.array([self._helper_cluster_silhouette(
+            idx, 
+            method_in=self._cluster_silhouette_reduction_intra_method,
+            method_out=self._cluster_silhouette_reduction_inter_method,
+        ) for idx in tqdm(range(self.n_clusters))])
+
+        print('Completed: Computing modified cluster silhouettes') if self._verbose else None
+
+    
+    def compute_cluster_scores(
+        self, 
+        power_clusterSize=2, 
+        power_clusterSilhouette=1.5
+    ):
+        """
+        Compute scores for each cluster. Score is intended to be
+         related to the quality of a cluster.
+        This is a somewhat arbitrary scoring system, but is useful when
+         performing assignment/selection of clusters.
+
+        Args:
+            power_clusterSize (float): 
+                power to raise the cluster size to
+            power_clusterSilhouette (float):
+                gain factor for exponentiating the cluster silhouette
+                 score
+        """
+
+        self.scores = torch.as_tensor((np.array(self.cluster_bool.sum(1)).squeeze()**power_clusterSize) * (10**(self.c_sil*power_clusterSilhouette)))
+        return self.scores
+
+
+
+    def _helper_compute_ROI_similarity_graph(
         self,
         spatialFootprints,
         features_NN,
@@ -193,7 +350,7 @@ class ROI_graph:
         ROI_session_bool,
     ):
         """
-        Compute the similarity matrix between ROIs based on the 
+        Computes the similarity matrix between ROIs based on the 
          conjunction of the similarity matrices for different modes
          (like the NN embedding, the SWT embedding, and the spatial footprint
          overlap).
@@ -222,7 +379,7 @@ class ROI_graph:
             algorithm=self._algo_sf,
             metric='manhattan',
             p=1,
-            # n_jobs=self.n_workers,
+            # n_jobs=self._n_workers,
             n_jobs=-1,
             **self._kwargs_sf
         ).fit(sf).kneighbors_graph(
@@ -255,23 +412,31 @@ class ROI_graph:
         return s_conj
 
 
-    def _compute_linkage_clusters(
+    def _helper_compute_linkage_clusters(
         self, 
         d,
     ):
         """
-        Linkage clustering of the similarity graph
+        Linkage clustering of the similarity graph.
+
+        Args:
+            d (torch.Tensor):
+                The distance matrix
+
+        Returns:
+            cluster_idx (np.ndarray):
+                The indices of each sample for each cluster
+            cluster_bool (np.ndarray):
+                The boolean matrix indicating which samples belong to which cluster
         """
 
-        verbose = False
-
         d_sq = scipy.spatial.distance.squareform(d)
-        print(f'Starting: computing linkage') if verbose else None
-        # self.links = helpers.merge_dicts(helpers.simple_multiprocessing(helper_compute_linkage, (self._linkage_methods, [d_sq]*len(self._linkage_methods)), workers=self.n_workers))
+        print(f'Starting: computing linkage') if self._verbose else None
+        # self.links = helpers.merge_dicts(helpers.simple_multiprocessing(helper_compute_linkage, (self._linkage_methods, [d_sq]*len(self._linkage_methods)), workers=self._n_workers))
         self.links = helpers.merge_dicts([helper_compute_linkage(method, d_sq) for method in self._linkage_methods])
-        print(f'Completed: computing linkage') if verbose else None
+        print(f'Completed: computing linkage') if self._verbose else None
 
-        print(f'Starting: clustering') if verbose else None
+        print(f'Starting: clustering') if self._verbose else None
         cluster_bool_all = []
         # print(self.links)
         for ii, t in enumerate(self._linkage_distances):
@@ -281,31 +446,35 @@ class ROI_graph:
         
         # print(cluster_bool_all)
         cluster_bool_all = scipy.sparse.vstack(cluster_bool_all)
-        print(f'Completed: clustering') if verbose else None
+        print(f'Completed: clustering') if self._verbose else None
 
-        print(f'Starting: filtering clusters by size removing redundant clusters') if verbose else None
+        print(f'Starting: filtering clusters by size removing redundant clusters') if self._verbose else None
         max_cluster_size = self._n_sessions if self._max_cluster_size is None else self._max_cluster_size
         nROIperCluster = np.array(cluster_bool_all.sum(1)).squeeze()
         idx_clusters_inRange = np.where( (nROIperCluster >= self._min_cluster_size) & (nROIperCluster <= max_cluster_size) )[0]
         
-        cluster_idx, cluster_freq = self._get_unique_clusters(cluster_bool_all[idx_clusters_inRange])
+        cluster_idx, cluster_freq = self._helper_get_unique_clusters(cluster_bool_all[idx_clusters_inRange])
 
         return cluster_idx, cluster_freq
 
-    def _helper_get_boolean_clusters_from_linkages(self, links, t, criterion='distance'):
-        ## if there aren't enough links to make a cluster, return an empty matrix
-        # if links.ndim == 1:
-        # # if False:
-        #     return []
-        # else:
-        return scipy.sparse.csr_matrix(labels_to_bool(scipy.cluster.hierarchy.fcluster(links, t=t, criterion=criterion)))
-
-
-
-    def _get_unique_clusters(
+   
+    def _helper_get_unique_clusters(
         self,
         cluster_bool,
     ):
+        """
+        Get the unique clusters from the boolean matrix of clusters.
+
+        Args:
+            cluster_bool (np.ndarray):
+                The boolean matrix indicating which samples belong to which cluster
+
+        Returns:
+            cluster_idx (np.ndarray):
+                The indices of each sample for each cluster
+            cluster_freq (np.ndarray):
+                The frequency of each cluster
+        """
         clusterHashes = np.concatenate([
             hash_matrix(batch) for batch in helpers.make_batches(cluster_bool, batch_size=self._batch_size_hashing, length=cluster_bool.shape[0])
         ], axis=0)
@@ -321,85 +490,23 @@ class ROI_graph:
 
         return cluster_idx, cluster_freq
 
-    
-    def _compute_cluster_similarity_graph(
-        self, 
-        cluster_similarity_reduction_intra='mean',
-        cluster_similarity_reduction_inter='max',
-        cluster_silhouette_reduction_intra='mean',
-        cluster_silhouette_reduction_inter='max',
-        n_workers=None,
-        ):
-
-        self._cluster_similarity_reduction_intra_method = cluster_similarity_reduction_intra
-        self._cluster_similarity_reduction_inter_method = cluster_similarity_reduction_inter
-
-        self._cluster_silhouette_reduction_intra_method = cluster_silhouette_reduction_intra
-        self._cluster_silhouette_reduction_inter_method = cluster_silhouette_reduction_inter
-
-        if n_workers is None:
-            n_workers = mp.cpu_count()
-
-        self.idxPixels_block = []
-        for block in self.blocks:
-            idx_tmp = np.zeros((self.frame_height, self.frame_width), dtype=np.bool8)
-            idx_tmp[block[0][0]:block[0][1], block[1][0]:block[1][1]] = True
-            idx_tmp = np.where(idx_tmp.reshape(-1))[0]
-            self.idxPixels_block.append(idx_tmp)
-
-        self.n_clusters = len(self.cluster_idx)
-
-        ## make a sparse matrix of the spatial footprints of the sum of each cluster
-        print('Starting: Making cluster spatial footprints') if self._verbose else None
-        self.spatialFootprints_coo = sparse.COO(self.sf_cat)
-        self.clusterBool_coo = sparse.COO(self.cluster_bool)
-        batch_size = int(max(1e8 // self.spatialFootprints_coo.shape[0], 1000))
-
-        self.sf_clusters = sparse.concatenate(
-            helpers.simple_multithreading(
-                self._helper_make_sfClusters,
-                [helpers.make_batches(self.clusterBool_coo[:,:,None], batch_size=batch_size)],
-                workers=n_workers
-            )
-        ).tocsr()
-        print('Completed: Making cluster spatial footprints') if self._verbose else None
-
-
-        print('Starting: Computing cluster similarities') if self._verbose else None
-        self.c_sim = scipy.sparse.lil_matrix((self.n_clusters, self.n_clusters))
-        self.s_local = sparse.COO(self.s.power(self._locality))
-        self._idxClusters_block = [np.where(self.sf_clusters[:, idx_pixels].sum(1) > 0)[0] for idx_pixels in self.idxPixels_block]  ## find indices of the clusters that have at least one non-zero pixel in the block
-
-        helpers.simple_multithreading(
-            self._helper_compute_cluster_similarity_batch,
-            [np.arange(len(self.blocks))],
-            workers=n_workers
-        )
-        print('Completed: Computing cluster similarities') if self._verbose else None
-
-
-        print('Starting: Computing modified cluster silhouettes') if self._verbose else None
-        
-        self._cluster_bool_coo = sparse.COO(self.cluster_bool)
-
-        self._cluster_bool_inv = sparse.COO(self.cluster_bool)
-        self._cluster_bool_inv.data = self._cluster_bool_inv.data < True
-        self._cluster_bool_inv.fill_value = True
-
-        self.c_sil = np.array([self._helper_cluster_silhouette(
-            idx, 
-            method_in=self._cluster_silhouette_reduction_intra_method,
-            method_out=self._cluster_silhouette_reduction_inter_method,
-        ) for idx in tqdm(range(self.n_clusters))])
-
-        print('Completed: Computing modified cluster silhouettes') if self._verbose else None
-
+ 
+    def _helper_get_boolean_clusters_from_linkages(self, links, t, criterion='distance'):
+        """
+        Get the boolean matrix of clusters from the linkage matrix.
+        """
+        return scipy.sparse.csr_matrix(labels_to_bool(scipy.cluster.hierarchy.fcluster(links, t=t, criterion=criterion)))
 
 
     def _helper_make_sfClusters(
         self,
         cb_s_batch
     ):
+        """
+        Helper function to make a cluster spatial footprint
+         using all the roi spatial footprints. and a boolean array
+         of which rois belong to which cluster.
+        """
         return (self.spatialFootprints_coo[None,:,:] * cb_s_batch).sum(axis=1)
 
 
@@ -407,6 +514,12 @@ class ROI_graph:
         self,
         i_block, 
     ):
+        """
+        Helper function to compute the similarity between clusters within
+         a single block.
+        
+        Updates attribute: self.c_sim
+        """
         cBool = sparse.COO(self.cluster_bool[self._idxClusters_block[i_block]])
         sizes_clusters = cBool.sum(1)
 
@@ -436,6 +549,31 @@ class ROI_graph:
         method_in='mean',
         method_out='max',
     ):
+        """
+        Helper function to compute the '_cluster_ silhouette score' of a cluster.
+        Note that a true silhouette scores is slightly different, as it is
+         defined for each sample, not for each cluster. This score describes the 
+         the margin between samples within a cluster and all other samples. It is
+         defined as ratio betwee between: 
+         A) the average pairwise similarity between all the samples within a
+         cluster to 
+         B) the highest similarity between any samples in the cluster and all other
+         samples.
+        
+        Args:
+            idx (np.ndarray):
+                The indices of the clusters to compute the silhouette score for
+            method_in (str):
+                The method to use to compute the average pairwise similarity between
+                 all the samples within a cluster.
+            method_out (str):
+                The method to use to compute the highest similarity between all
+                samples within a cluster and all other samples.
+
+        Returns:
+            silhouette_scores (np.ndarray):
+                The silhouette score of each cluster
+        """
         assert method_in in ['mean', 'min'], 'method_in must be mean or min'
         assert method_out in ['max'], 'method_out must be max'
 
@@ -461,28 +599,48 @@ class ROI_graph:
         block_height=100, 
         block_width=100,
         overlapping_width_Multiplier=0.2,
-        outer_block_height=None,
-        outer_block_width=None,
-        clamp_outer_block_to_frame=True,
+        clamp_blocks_to_frame=True,
     ):     
-        
+        """
+        Makes blocks. These blocks partition up the field of
+         view into smaller sections. Computations in the module
+         are often pairwise comparisons, so it is useful to
+         restrict comparisons to smaller blocks.
+
+        Args:
+            frame_height (int):
+                The height of the field of view.
+            frame_width (int):
+                The width of the field of view.
+            block_height (int):
+                The height of each block.
+                This value will be adjusted slightly to tile cleanly
+                 if clamp_blocks_to_frame is True.
+            block_width (int):
+                The width of each block.
+                This value will be adjusted slightly to tile cleanly
+                 if clamp_blocks_to_frame is True.
+            overlapping_width_Multiplier (float):
+                The fractional amount of overlap between blocks.
+            clamp_blocks_to_frame (bool):
+                If True, then edges of the blocks will be clamped to the
+                 edges of the field of view.
+        """
         # block prep
         block_height_half = block_height//2
         block_width_half = block_width//2
         
-        # inner block prep
-        if outer_block_height is None:
-            outer_block_height = block_height * 1.0
-            print(f'Outer block height not specified. Using {outer_block_height}')
-        if outer_block_width is None:
-            outer_block_width = block_width * 1.0
-            print(f'Outer block width not specified. Using {outer_block_width}')
+        if block_height is None:
+            block_height = block_height * 1.0
+            print(f'block height not specified. Using {block_height}')
+        if block_width is None:
+            block_width = block_width * 1.0
+            print(f'block width not specified. Using {block_width}')
             
-        outer_block_height_half = outer_block_height//2
-        outer_block_width_half = outer_block_width//2
+        block_height_half = block_height//2
+        block_width_half = block_width//2
         
         # find centers of blocks
-    #     n_blocks_x = np.ceil((frame_width*overlapping_width_Multiplier) / block_width).astype(np.int64)
         n_blocks_x = np.ceil(frame_width / (block_width - (block_width*overlapping_width_Multiplier))).astype(np.int64)
         
         centers_x = np.linspace(
@@ -492,18 +650,13 @@ class ROI_graph:
             endpoint=True
         )
 
-    #     n_blocks_y = frame_height / block_height
         n_blocks_y = np.ceil(frame_height / (block_height - (block_height*overlapping_width_Multiplier))).astype(np.int64)
-    #     n_blocks_y = np.ceil(n_blocks_y*overlapping_width_Multiplier).astype(np.int64)
         centers_y = np.linspace(
             start=block_height_half,
             stop=frame_height - block_height_half,
             num=n_blocks_y,
             endpoint=True
         )
-        
-    #     print(n_blocks_x)
-    #     print(centers_x)
         
         # make blocks
         blocks, outer_blocks = [], []
@@ -515,12 +668,12 @@ class ROI_graph:
                 ])
                 
                 outer_blocks.append([
-                    list(np.int64([centers_y[i_y] - outer_block_height_half , centers_y[i_y] + outer_block_height_half])),
-                    list(np.int64([centers_x[i_x] - outer_block_width_half , centers_x[i_x] + outer_block_width_half]))                
+                    list(np.int64([centers_y[i_y] - block_height_half , centers_y[i_y] + block_height_half])),
+                    list(np.int64([centers_x[i_x] - block_width_half , centers_x[i_x] + block_width_half]))                
                 ])
                 
         # clamp outer block to limits of frame
-        if clamp_outer_block_to_frame:
+        if clamp_blocks_to_frame:
             for ii, outer_block in enumerate(outer_blocks):
                 br_h = np.array(outer_block[0]) # block range height
                 br_w = np.array(outer_block[1]) # block range width
@@ -537,7 +690,10 @@ class ROI_graph:
     def visualize_blocks(
         self,
     ):
-        im = np.zeros((self.frame_height, self.frame_width, 3))
+        """
+        Displays the blocks over a field of view.
+        """
+        im = np.zeros((self._frame_height, self._frame_width, 3))
         for block in self.blocks:
             im[block[0][0]:block[0][1], block[1][0]:block[1][1], 0] += 0.2
         for block in self.outer_blocks:

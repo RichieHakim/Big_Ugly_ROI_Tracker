@@ -47,10 +47,10 @@ class Cluster_Assigner:
     ):
         """
         Args:
-            c (torch.Tensor, dtype float):
+            c (scipy.sparse.csr_matrix, dtype float):
                 The cluster similarity matrix.
                 shape: (n_clusters, n_clusters)
-            h (torch.Tensor, dtype bool):
+            h (scipy.sparse.csr_matrix, dtype bool):
                 The cluster membership matrix.
                 shape: (n_samples, n_clusters)
             w (torch.Tensor, dtype float):
@@ -129,10 +129,7 @@ class Cluster_Assigner:
 
         self._DEVICE = device
 
-        if c.layout == torch.sparse_coo:
-            c_tmp = c.coalesce()
-        elif c.layout == torch.strided:
-            c_tmp = c.to_sparse().coalesce()
+        c_tmp = helpers.scipy_sparse_to_torch_coo(c).coalesce().type(torch.float32).to(self._DEVICE)
         self.c = ts.SparseTensor(
             row=c_tmp.indices()[0], 
             col=c_tmp.indices()[1], 
@@ -140,9 +137,9 @@ class Cluster_Assigner:
             sparse_sizes=c_tmp.shape,
         ).to(self._DEVICE)
 
-        self.h = h.to_sparse().type(torch.float32).to(self._DEVICE)
-        # self.w = w.to_sparse().to(self._DEVICE) if w is not None else torch.ones(self._n_samples).type(torch.float32).to_sparse().to(self._DEVICE)
+        self.h = helpers.scipy_sparse_to_torch_coo(h).coalesce().type(torch.float32).to(self._DEVICE)
         self.w = (torch.eye(len(w)) * (w / w.max())[None,:]).to_sparse().type(torch.float32).to(self._DEVICE) if w is not None else torch.eye(self._n_samples).type(torch.float32).to_sparse().to(self._DEVICE)
+
         self.m = m_init.to(self._DEVICE) if m_init is not None else (torch.ones(self._n_clusters)*0.1 + torch.rand(self._n_clusters)*0.05).type(torch.float32).to(self._DEVICE)
         self.m.requires_grad=True
 
