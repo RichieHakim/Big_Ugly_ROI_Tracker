@@ -53,7 +53,6 @@ def compute_colored_FOV(
     if confidence is None:
         confidence = np.ones(len(preds))
     
-    idx_roi_cat = np.concatenate([np.arange(sfs.shape[0]) for sfs in spatialFootprints]) # indices of each ROI concatenated together
     idx_roi_session = np.concatenate([np.ones(sfs.shape[0])*ii for ii,sfs in enumerate(spatialFootprints)])
 
     n_sessions = len(spatialFootprints)
