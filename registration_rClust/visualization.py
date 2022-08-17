@@ -47,9 +47,30 @@ def compute_colored_FOV(
     FOV_height,
     FOV_width,
     preds,
-    confidence=None
+    confidence=None,
+    threshold_confidence = 0.5
 ):
+    """
+    Computes a set of images of FOVs of spatial footprints, colored
+     by the predicted class.
 
+    Args:
+        spatialFootprints (scipy.sparse.csr_matrix):
+            All the spatial footprints
+        FOV_height (int):
+            Height of the field of view
+        FOV_width (int):
+            Width of the field of view
+        preds (np.ndarray):
+            Predicted class for each spatial footprint
+        confidence (np.ndarray):
+            Confidence for each spatial footprint
+            If None, all confidence values are set to 1.
+            Spatial fooprints with confidence < threshold_confidence
+             have a color set to cmap(-1), which is typically black.
+        threshold_confidence (float):
+            Threshold for the confidence values.
+    """
     if confidence is None:
         confidence = np.ones(len(preds))
     
@@ -60,7 +81,7 @@ def compute_colored_FOV(
     n_planes = n_sessions
     labels = helpers.squeeze_integers(preds.numpy().astype(np.int64))
 
-    labels[(confidence < 0.5)] = -1
+    labels[(confidence < threshold_confidence)] = -1
     # labels = labels
 
     ucid_toUse = labels
