@@ -182,6 +182,8 @@ class ROI_graph:
 
         print('Computing pairwise similarity between ROIs...') if self._verbose else None
         for ii, block in tqdm(enumerate(self.blocks), total=len(self.blocks)):
+            # if ii < len(self.blocks) - 3:
+            #     continue
             idxROI_block = np.where(self.sf_cat[:, self.idxPixels_block[ii]].sum(1) > 0)[0]
             
             ## Compute pairwise similarity matrix
@@ -218,7 +220,7 @@ class ROI_graph:
 
         ## Dump the results to object attributes
         self.cluster_idx = np.array(cluster_idx_all, dtype=object)[idx]
-        self.cluster_bool = scipy.sparse.vstack([scipy.sparse.csr_matrix(helpers.idx2bool(cid, length=self.s.shape[0])) for cid in self.cluster_idx])
+        self.cluster_bool = scipy.sparse.vstack([scipy.sparse.csr_matrix(helpers.idx2bool(np.array(cid, dtype=np.int64), length=self.s.shape[0])) for cid in self.cluster_idx])
 
 
     def compute_cluster_similarity_graph(

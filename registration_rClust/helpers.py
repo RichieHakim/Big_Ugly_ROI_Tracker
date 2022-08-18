@@ -3,12 +3,92 @@ import multiprocessing as mp
 import os
 import hashlib
 from pathlib import Path
+import copy
 
 import numpy as np
 import torch
 import scipy.sparse
 import sparse
 import torch_sparse
+
+"""
+All of these are from basic_neural_processing_modules
+"""
+
+def set_device(use_GPU=True, device_num=0, verbose=True):
+    """
+    Set torch.cuda device to use.
+    Assumes that only one GPU is available or
+     that you wish to use cuda:0 only.
+    RH 2021
+
+    Args:
+        use_GPU (int):
+            If 1, use GPU.
+            If 0, use CPU.
+    """
+    if use_GPU:
+        print(f'devices available: {[torch.cuda.get_device_properties(ii) for ii in range(torch.cuda.device_count())]}') if verbose else None
+        device = f"cuda:{device_num}" if torch.cuda.is_available() else "cpu"
+        if device == "cpu":
+            print("no GPU available. Using CPU.") if verbose else None
+        else:
+            print(f"Using device: '{device}': {torch.cuda.get_device_properties(device_num)}") if verbose else None
+    else:
+        device = "cpu"
+        print(f"device: '{device}'") if verbose else None
+
+    return device
+
+
+def get_dir_contents(directory):
+    '''
+    Get the contents of a directory (does not
+     include subdirectories).
+    RH 2021
+
+    Args:
+        directory (str):
+            path to directory
+    
+    Returns:
+        folders (List):
+            list of folder names
+        files (List):
+            list of file names
+    '''
+    walk = os.walk(directory, followlinks=False)
+    folders = []
+    files = []
+    for ii,level in enumerate(walk):
+        folders, files = level[1:]
+        if ii==0:
+            break
+    return folders, files
+
+
+def bounded_logspace(start, stop, num,):
+    """
+    Like np.logspace, but with a defined start and
+     stop.
+    RH 2022
+    
+    Args:
+        start (float):
+            First value in output array
+        stop (float):
+            Last value in output array
+        num (int):
+            Number of values in output array
+            
+    Returns:
+        output (np.ndarray):
+            Array of values
+    """
+
+    exp = 2  ## doesn't matter what this is, just needs to be > 1
+
+    return exp ** np.linspace(np.log(start)/np.log(exp), np.log(stop)/np.log(exp), num, endpoint=True)
 
 
 def simple_multithreading(func, args, workers):
@@ -310,7 +390,61 @@ def idx_to_oneHot(arr, n_classes=None):
     oneHot[np.arange(arr.size), arr] = 1
     return oneHot
 
-    
+
+def simple_save(obj, filename, mkdir=False):
+    import pickle
+    from pathlib import Path
+    if mkdir:
+        Path(filename).parent.mkdir(parents=True, exist_ok=True)
+    with open(filename, 'wb') as f:
+        pickle.dump(obj, f)
+
+
+def deep_update_dict(dictionary, key, val, in_place=False):
+    """
+    Updates a dictionary with a new value.
+    RH 2022
+
+    Args:
+        dictionary (Dict):
+            dictionary to update
+        key (list of str):
+            Key to update
+            List elements should be strings.
+            Each element should be a hierarchical
+             level of the dictionary.
+            DEMO:
+                deep_update_dict(params, ['dataloader_kwargs', 'prefetch_factor'], val)
+        val (any):
+            Value to update with
+        in_place (bool):
+            whether to update in place
+
+    Returns:
+        output (Dict):
+            updated dictionary
+    """
+    def helper_deep_update_dict(d, key, val):
+        if type(key) is str:
+            key = [key]
+
+        assert key[0] in d, f"RH ERROR, key: '{key[0]}' is not found"
+
+        if type(key) is list:
+            if len(key) > 1:
+                helper_deep_update_dict(d[key[0]], key[1:], val)
+            elif len(key) == 1:
+                key = key[0]
+                d.update({key:val})
+
+    if in_place:
+        helper_deep_update_dict(dictionary, key, val)
+    else:
+        d = copy.deepcopy(dictionary)
+        helper_deep_update_dict(d, key, val)
+        return d
+        
+
 #########################
 # visualization helpers #
 #########################

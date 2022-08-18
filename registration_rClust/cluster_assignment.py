@@ -109,7 +109,8 @@ class Cluster_Assigner:
                 The penalty applied to the sample weights loss.
             maskL1_penalty (float):
                 The penalty applied to the L1 norm of the mask.
-                Keep this to 0 unless you really want sparse outputs.
+                Adjust this to reduce the probability of extracting clusters
+                 with low scores.
             tol_convergence (float):
                 The tolerance for the convergence of the optimization.
             window_convergence (int):
@@ -249,8 +250,10 @@ class Cluster_Assigner:
         h_ts = helpers.torch_to_torchSparse(self.h)
 
         self.m_bool = (self.activate_m() > m_threshold).squeeze().cpu()
-        h_preds = (h_ts[:, self.m_bool] * (torch.arange(self.m_bool.sum(), device=self._DEVICE)[None,:]+1)).detach().cpu()
-        print(h_preds.sizes())
+        h_ts_bool = h_ts[:, self.m_bool]
+        n_multiples = (h_ts_bool.sum(1) > 1).sum()
+        print(f'WARNING: {n_multiples} samples are matched with multiple clusters. Consider increasing the sample_weight_penalty during training.') if n_multiples > 0 else None
+        h_preds = (h_ts_bool * (torch.arange(self.m_bool.sum(), device=self._DEVICE)[None,:]+1)).detach().cpu()
         # h_preds[h_preds==0] = -1
 
         if h_preds.numel() == 0:
@@ -465,15 +468,23 @@ class Cluster_Assigner:
     def plot_clusterScores(self, bins=100):
         if hasattr(self, 'm_bool'):
             m_bool = self.m_bool
+            confidence = self.confidence
+            preds = self.preds
         else:
             preds, confidence, scores_samples, m_bool = self.predict()
             if preds is None:
                 print('Plot failed: preds is None.')
                 return None
         scores = helpers.diag_sparse(self.w).cpu()[m_bool.cpu()]
+
         plt.figure()
         plt.hist(scores, bins=bins, log=True)
-        plt.xlabel('cluster w score')
+        plt.xlabel('cluster score')
+        plt.ylabel('count')
+
+        plt.figure()
+        plt.hist(confidence[preds >= 0], bins=bins, log=True)
+        plt.xlabel('confidence')
         plt.ylabel('count')
 
     def plot_sampleWeights(self):
@@ -511,8 +522,10 @@ class Cluster_Assigner:
         plt.imshow(self.c[mt, mt].detach().cpu(), aspect='auto')
 
     def plot_c_masked_matrix(self, m_threshold=0.5, **kwargs_imshow):
-        ma = self.activate_m()
-        cm = self.c * ma[None,:]
-        cm[self._dmCEL.idx_diag, self._dmCEL.idx_diag] = self.c.diag()
+        import sparse
+        mt = self.activate_m() > m_threshold
+        # return (self.c * mt[None,:])
+        cdm = (sparse.COO(self.c.to_scipy()) * mt[None,:].cpu().numpy()  * mt[:, None].cpu().numpy()).tocsr().tolil()
+        cdm[list(self._dmCEL.idx_diag.cpu().numpy()), list(self._dmCEL.idx_diag.cpu().numpy())] = self.c.get_diag().cpu()
         plt.figure()
-        plt.imshow((cm * ma[:,None]).detach().cpu(), aspect='auto')
+        plt.imshow(cdm.toarray(), aspect='auto')

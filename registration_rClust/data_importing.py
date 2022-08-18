@@ -55,13 +55,14 @@ class Data_suite2p:
                 List of imported files. Type depends on sf_type.
         """
 
+        print(f"Starting: Importing spatial footprints from stat files") if self._verbose else None
+
         self.statFiles = [np.load(path, allow_pickle=True) for path in self.paths_stat]
 
         self.n_roi = [len(stat) for stat in self.statFiles]
         self.n_roi_total = sum(self.n_roi)
 
-        if self._verbose:
-            print(f"Imported {len(self.statFiles)} stat files into class as self.statFiles. Total number of ROIs: {self.n_roi_total}. Number of ROI from each file: {self.n_roi}")
+        print(f"Completed: Imported {len(self.statFiles)} stat files into class as self.statFiles. Total number of ROIs: {self.n_roi_total}. Number of ROI from each file: {self.n_roi}") if self._verbose else None
 
         return self.statFiles
 
