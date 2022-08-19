@@ -1,5 +1,8 @@
+import gc
+
 import torch
 import torch_sparse as ts
+import scipy.sparse
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -130,7 +133,7 @@ class Cluster_Assigner:
 
         self._DEVICE = device
 
-        c_tmp = helpers.scipy_sparse_to_torch_coo(c).coalesce().type(torch.float32).to(self._DEVICE)
+        c_tmp = helpers.scipy_sparse_to_torch_coo(c).coalesce().type(torch.float32)
         self.c = ts.SparseTensor(
             row=c_tmp.indices()[0], 
             col=c_tmp.indices()[1], 
@@ -139,7 +142,11 @@ class Cluster_Assigner:
         ).to(self._DEVICE)
 
         self.h = helpers.scipy_sparse_to_torch_coo(h).coalesce().type(torch.float32).to(self._DEVICE)
-        self.w = (torch.eye(len(w)) * (w / w.max())[None,:]).to_sparse().type(torch.float32).to(self._DEVICE) if w is not None else torch.eye(self._n_samples).type(torch.float32).to_sparse().to(self._DEVICE)
+
+        w_tmp = scipy.sparse.lil_matrix((self._n_clusters, self._n_clusters))
+        w_tmp[range(self._n_clusters), range(self._n_clusters)] = (w / w.max()) if w is not None else 1
+        self.w = helpers.scipy_sparse_to_torch_coo(w_tmp).coalesce().type(torch.float32).to(self._DEVICE)
+        # self.w = (torch.eye(len(w)) * (w / w.max())[None,:]).to_sparse().type(torch.float32).to(self._DEVICE) if w is not None else torch.eye(self._n_samples).type(torch.float32).to_sparse().to(self._DEVICE)
 
         self.m = m_init.to(self._DEVICE) if m_init is not None else (torch.ones(self._n_clusters)*0.1 + torch.rand(self._n_clusters)*0.05).type(torch.float32).to(self._DEVICE)
         self.m.requires_grad=True
@@ -153,7 +160,6 @@ class Cluster_Assigner:
         self._maskL1_penalty = maskL1_penalty
 
         self._dmCEL = self._DoubleMasked_CEL(
-            w=self.w,
             c=self.c,
             n_clusters=self._n_clusters,
             device=self._DEVICE,
@@ -193,6 +199,9 @@ class Cluster_Assigner:
             'L_maskL1': [],
         }
 
+        # gc.collect()
+        # torch.cuda.empty_cache()
+
     def fit(
         self, 
         min_iter=1e3,
@@ -206,41 +215,41 @@ class Cluster_Assigner:
             self._optimizer.zero_grad()
 
             L_cs = self._dmCEL(c=self.c, m=self.m) * self._dmCEL_penalty  ## 'cluster similarity loss'
-            L_sampleWeight = self._loss_sampleWeight(self.h, self.activate_m()) * self._sampleWeight_penalty
-            # L_sampleWeight = self._loss_sampleWeight(self.h, self.m) * self._sampleWeight_penalty
-            L_fracWeighted = self._loss_fracWeighted(self.activate_m()) * self._fracWeight_penalty
-            L_maskL1 = torch.sum(torch.abs(self.activate_m())) * self._maskL1_penalty
+            # L_sampleWeight = self._loss_sampleWeight(self.h, self.activate_m()) * self._sampleWeight_penalty
+            # # L_sampleWeight = self._loss_sampleWeight(self.h, self.m) * self._sampleWeight_penalty
+            # L_fracWeighted = self._loss_fracWeighted(self.activate_m()) * self._fracWeight_penalty
+            # L_maskL1 = torch.sum(torch.abs(self.activate_m())) * self._maskL1_penalty
 
-            self._loss = L_cs + L_fracWeighted + L_sampleWeight + L_maskL1
-            # self._loss = L_fracWeighted + L_sampleWeight + L_maskL1
-            # self._loss = L_cs 
+            # self._loss = L_cs + L_fracWeighted + L_sampleWeight + L_maskL1
+            # # self._loss = L_fracWeighted + L_sampleWeight + L_maskL1
+            # # self._loss = L_cs 
 
-            if torch.isnan(self._loss):
-                print(f'STOPPING EARLY: loss is NaN. iter: {self._i_iter}  loss: {self._loss.item():.4f}  L_cs: {L_cs.item():.4f}  L_fracWeighted: {L_fracWeighted.item():.4f}  L_sampleWeight: {L_sampleWeight.item():.4f}  L_maskL1: {L_maskL1.item():.4f}')
-                break
+            # if torch.isnan(self._loss):
+            #     print(f'STOPPING EARLY: loss is NaN. iter: {self._i_iter}  loss: {self._loss.item():.4f}  L_cs: {L_cs.item():.4f}  L_fracWeighted: {L_fracWeighted.item():.4f}  L_sampleWeight: {L_sampleWeight.item():.4f}  L_maskL1: {L_maskL1.item():.4f}')
+            #     break
 
-            self._loss.backward()
-            self._optimizer.step()
-            self._scheduler.step()
+            # self._loss.backward()
+            # self._optimizer.step()
+            # self._scheduler.step()
 
-            self.m.data = torch.maximum(self.m.data , torch.as_tensor(-14, device=self._DEVICE))
+            # self.m.data = torch.maximum(self.m.data , torch.as_tensor(-14, device=self._DEVICE))
 
-            self.losses_logger['loss'].append(self._loss.item())
-            self.losses_logger['L_cs'].append(L_cs.item())
-            self.losses_logger['L_fracWeighted'].append(L_fracWeighted.item())
-            self.losses_logger['L_sampleWeight'].append(L_sampleWeight.item())
-            self.losses_logger['L_maskL1'].append(L_maskL1.item())
+            # self.losses_logger['loss'].append(self._loss.item())
+            # self.losses_logger['L_cs'].append(L_cs.item())
+            # self.losses_logger['L_fracWeighted'].append(L_fracWeighted.item())
+            # self.losses_logger['L_sampleWeight'].append(L_sampleWeight.item())
+            # self.losses_logger['L_maskL1'].append(L_maskL1.item())
 
-            if self._i_iter%self._freqCheck_convergence==0 and self._i_iter>self._window_convergence and self._i_iter>min_iter:
-                diff_window_convergence, loss_smooth, converged = self._convergence_checker(self.losses_logger['loss'])
-                if converged:
-                    print(f"STOPPING: Convergence reached in {self._i_iter} iterations.  loss: {self.losses_logger['loss'][-1]:.4f}  loss_smooth: {loss_smooth:.4f}")
-                    break
+            # if self._i_iter%self._freqCheck_convergence==0 and self._i_iter>self._window_convergence and self._i_iter>min_iter:
+            #     diff_window_convergence, loss_smooth, converged = self._convergence_checker(self.losses_logger['loss'])
+            #     if converged:
+            #         print(f"STOPPING: Convergence reached in {self._i_iter} iterations.  loss: {self.losses_logger['loss'][-1]:.4f}  loss_smooth: {loss_smooth:.4f}")
+            #         break
 
-            if verbose and self._i_iter % verbose_interval == 0:
-                print(f'iter: {self._i_iter}:  loss_total: {self._loss.item():.4f}  lr: {self._scheduler.get_last_lr()[0]:.5f}   loss_cs: {L_cs.item():.4f}  loss_fracWeighted: {L_fracWeighted.item():.4f}  loss_sampleWeight: {L_sampleWeight.item():.4f}  loss_maskL1: {L_maskL1.item():.4f}  diff_loss: {diff_window_convergence:.4f}  loss_smooth: {loss_smooth:.4f}')
-                # print(torch.isnan(self.m).sum())
-            self._i_iter += 1
+            # if verbose and self._i_iter % verbose_interval == 0:
+            #     print(f'iter: {self._i_iter}:  loss_total: {self._loss.item():.4f}  lr: {self._scheduler.get_last_lr()[0]:.5f}   loss_cs: {L_cs.item():.4f}  loss_fracWeighted: {L_fracWeighted.item():.4f}  loss_sampleWeight: {L_sampleWeight.item():.4f}  loss_maskL1: {L_maskL1.item():.4f}  diff_loss: {diff_window_convergence:.4f}  loss_smooth: {loss_smooth:.4f}')
+            #     # print(torch.isnan(self.m).sum())
+            # self._i_iter += 1
 
 
     def predict(
@@ -282,7 +291,6 @@ class Cluster_Assigner:
     class _DoubleMasked_CEL:
         def __init__(
             self,
-            w,
             c,
             n_clusters,
             device='cpu',
@@ -290,17 +298,19 @@ class Cluster_Assigner:
             sig_slope=5,
             sig_center=0.5,
         ):
-            self.labels = torch.arange(n_clusters, device=device, dtype=torch.int64)
+            # self.labels = torch.arange(n_clusters, device=device, dtype=torch.int64)
             # self.CEL = torch.nn.CrossEntropyLoss(reduction='none')
             # self.CEL = lambda x : helpers.diag_sparse(torch.sparse.log_softmax(x, dim=1).coalesce())
-            self.CEL = lambda x : -helpers.diag_sparse(torch.sparse.log_softmax(x/self.temp, dim=1).coalesce())
+            # self.CEL = lambda x : -helpers.diag_sparse(torch.sparse.log_softmax(x/self.temp, dim=1).coalesce())
+            # self.CEL = lambda x : -helpers.diag_sparse(helpers.ts_logSoftmax(x, temperature=self.temp).coalesce())
+            self.CEL = lambda x :  - helpers.ts_logSoftmax(x, temperature=self.temp, shift=None).get_diag()
             self.temp = temp
             self.activation = self.make_sigmoid_function(sig_slope, sig_center)
             self.device=device
             
             # self.w = w
             
-            self.idx_diag = torch.arange(n_clusters, device=device, dtype=torch.int64)
+            # self.idx_diag = torch.arange(n_clusters, device=device, dtype=torch.int64)
 
             # self.m_eye = torch.sparse_coo_tensor(
             #     indices=torch.vstack((torch.arange(n_clusters), torch.arange(n_clusters))).to(device),
@@ -313,21 +323,27 @@ class Cluster_Assigner:
                 # (torch.logical_not(torch.eye(n_clusters, device=device)) + torch.eye(n_clusters, device=device)*c.diag()[None,:]).type(torch.float32) / self.temp,
                 # c / self.temp,
                 # self.labels
-                c.to_torch_sparse_coo_tensor(),
+                c,
             )
             self.best_case_loss = self.CEL(
-                # (torch.eye(n_clusters, device=device)*c.diag()[None,:]).type(torch.float32) / self.temp,
-                (torch.sparse_coo_tensor(
-                    indices=torch.vstack((torch.arange(n_clusters), torch.arange(n_clusters))).to(device),
-                    # values=torch_helpers.diag_sparse(c), 
-                    values=c.get_diag(), 
-                    size=(n_clusters, n_clusters)
-                    )
-                ).type(torch.float32),
-                # ).type(torch.float32) / self.temp,
-                # self.labels
+                # torch.sparse_coo_tensor(
+                #     indices=torch.vstack((torch.arange(n_clusters), torch.arange(n_clusters))).to(device),
+                #     # values=torch_helpers.diag_sparse(c), 
+                #     values=c.get_diag().type(torch.float32), 
+                #     size=(n_clusters, n_clusters)
+                # )
+                ts.tensor.SparseTensor(
+                    row=torch.arange(n_clusters, device=device, dtype=torch.int64),
+                    col=torch.arange(n_clusters, device=device, dtype=torch.int64),
+                    value=c.get_diag().type(torch.float32),
+                    sparse_sizes=(n_clusters, n_clusters),
+                    # indices=torch.vstack((torch.arange(n_clusters), torch.arange(n_clusters))).to(device),
+                    # # values=torch_helpers.diag_sparse(c), 
+                    # values=c.get_diag().type(torch.float32), 
+                    # size=(n_clusters, n_clusters)
+                )
             )
-            self.worst_minus_best = self.worst_case_loss - self.best_case_loss  + 1e-7
+            self.worst_minus_best = self.worst_case_loss - self.best_case_loss  + 1e-8
 
         def make_sigmoid_function(
             self,
@@ -338,6 +354,7 @@ class Cluster_Assigner:
             
         def __call__(self, c, m):
             mp = self.activation(m)  ## constrain to be 0-1
+
             ###### cm = c * mp[None,:]  ## 'c masked'. Mask only applied to columns.
             # cm = c @ torch.sparse_coo_tensor(
             #     indices=torch.vstack((torch.arange(c.shape[0]), torch.arange(c.shape[0]))).to(self.device),
@@ -349,20 +366,31 @@ class Cluster_Assigner:
             # cm = c
             ###### cm[self.idx_diag, self.idx_diag] = c.diagonal()
             # cm = c * mp.sum()
-            cm = c * mp[None,:]
-            cm = cm.set_diag(c.get_diag())
-            lv = self.CEL(cm.to_torch_sparse_coo_tensor())
+
+            # cm = c * mp[None,:]
+            # # cm = cm.set_diag(c.get_diag())
+            # cm = helpers.ts_setDiag_lowMem(cm, c.get_diag())
+            # lv = self.CEL(cm)
+
+            lv = self.CEL(helpers.ts_setDiag_lowMem(c * mp[None,:], c.get_diag()))
+
             # lv = self.CEL(
             #     cm/self.temp, 
             #     # self.labels
             #     )  ## 'loss vector' showing loss of each row (each cluster)
             # print(self.worst_minus_best)
+
             lv_norm = (lv - self.best_case_loss) / self.worst_minus_best
+
             # print(lv_norm @ mp)
             # self.test = mp
+            
             l = (lv_norm @ mp) / mp.sum()  ## 'loss'
+            
             # l = ((lv/self.w) @ mp) / mp.sum()  ## 'loss'
+
             return l
+            # return 1
 
     class _Loss_fracWeighted:
         def __init__(

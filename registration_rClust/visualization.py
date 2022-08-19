@@ -55,8 +55,9 @@ def compute_colored_FOV(
      by the predicted class.
 
     Args:
-        spatialFootprints (scipy.sparse.csr_matrix):
-            All the spatial footprints
+        spatialFootprints (list of scipy.sparse.csr_matrix):
+            List where each element is the sparse array of all the spatial
+             footprints in that session.
         FOV_height (int):
             Height of the field of view
         FOV_width (int):
@@ -79,7 +80,7 @@ def compute_colored_FOV(
     n_sessions = len(spatialFootprints)
 
     n_planes = n_sessions
-    labels = helpers.squeeze_integers(preds.numpy().astype(np.int64))
+    labels = helpers.squeeze_integers(np.array(preds).astype(np.int64))
 
     labels[(confidence < threshold_confidence)] = -1
     # labels = labels

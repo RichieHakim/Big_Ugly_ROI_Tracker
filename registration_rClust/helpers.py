@@ -4,12 +4,13 @@ import os
 import hashlib
 from pathlib import Path
 import copy
+import pickle
 
 import numpy as np
 import torch
 import scipy.sparse
 import sparse
-import torch_sparse
+import torch_sparse as ts
 
 """
 All of these are from basic_neural_processing_modules
@@ -295,17 +296,6 @@ def scipy_sparse_to_torch_coo(sp_array, dtype=None):
     return torch.sparse_coo_tensor(i, v, torch.Size(shape))
 
 
-def torch_to_torchSparse(s):
-    import torch_sparse
-
-    return torch_sparse.tensor.SparseTensor(
-        row=s.indices()[0],
-        col=s.indices()[1],
-        value=s.values(),
-        sparse_sizes=s.shape,
-    )
-
-
 def pydata_sparse_to_torch_coo(sp_array):
     coo = sparse.COO(sp_array)
     
@@ -317,33 +307,6 @@ def pydata_sparse_to_torch_coo(sp_array):
     v = torch.FloatTensor(values)
     shape = coo.shape
     return torch.sparse_coo_tensor(i, v, torch.Size(shape))
-
-
-def pydata_sparse_to_torchSparse(s):
-    return torch_sparse.from_torch_sparse(pydata_sparse_to_torch_coo(s).coalesce())
-
-
-
-def diag_sparse(x, return_sparse_vals=True):
-    """
-    Get the diagonal of a sparse tensor.
-    RH 2022
-
-    Args:
-        x (torch.sparse.FloatTensor):
-            Pytorch sparse tensor.
-        return_sparse_vals (bool):
-            If True, returns 'sparse' (zeroed) values as well.
-            If False, returns only specified (non-sparsed out) values.
-    """
-    if return_sparse_vals is False:
-        row, col = x.indices()
-        values = x.values()
-        return values[row == col]
-    else:
-        x_ts = torch_to_torchSparse(x)
-        return x_ts.get_diag()
-
 
 def squeeze_integers(intVec):
     """
@@ -398,6 +361,9 @@ def simple_save(obj, filename, mkdir=False):
         Path(filename).parent.mkdir(parents=True, exist_ok=True)
     with open(filename, 'wb') as f:
         pickle.dump(obj, f)
+def simple_load(filename):
+    with open(filename, 'rb') as f:
+        return pickle.load(f)
 
 
 def deep_update_dict(dictionary, key, val, in_place=False):
@@ -444,6 +410,99 @@ def deep_update_dict(dictionary, key, val, in_place=False):
         helper_deep_update_dict(d, key, val)
         return d
         
+
+######################
+# torch_sparse stuff #
+######################
+
+def pydata_sparse_to_torchSparse(s):
+    return ts.from_torch_sparse(pydata_sparse_to_torch_coo(s).coalesce())
+
+def torch_to_torchSparse(s):
+    return ts.tensor.SparseTensor(
+        row=s.indices()[0],
+        col=s.indices()[1],
+        value=s.values(),
+        sparse_sizes=s.shape,
+    )
+
+
+def diag_sparse(x, return_sparse_vals=True):
+    """
+    Get the diagonal of a sparse tensor.
+    RH 2022
+
+    Args:
+        x (torch.sparse.FloatTensor):
+            Pytorch sparse tensor.
+        return_sparse_vals (bool):
+            If True, returns 'sparse' (zeroed) values as well.
+            If False, returns only specified (non-sparsed out) values.
+    """
+    if return_sparse_vals is False:
+        row, col = x.indices()
+        return x.values()[row == col]
+    else:
+        x_ts = torch_to_torchSparse(x)
+        return x_ts.get_diag()
+
+def ts_softmax(x, temperature=1.0):
+    tmp = ts.tensor.SparseTensor(
+        row=x.storage.row(),
+        col=x.storage.col(),
+        value=torch.exp(x.storage.value()) / temperature,
+        sparse_sizes=x.sizes()
+    )
+    return tmp / tmp.sum(1)[:,None]
+
+def ts_logSoftmax(x, temperature=1.0, shift=None):
+    """
+    Log softmax of a sparse tensor.
+    OPERATES ONLY ON NON-SPARSE VALUES. SPARSE INDICES ARE IGNORED.
+    Optimized for sparse tensors; faster and less memory than
+     torch.sparse.log_softmax().
+
+    Trickery: 
+    log softmax can be simplified to:
+        x - log(sum(exp(x), dim=1))
+    The above equation is numerically unstable because exp(x) can
+     overflow. So, we shift the values of x down by x.max(1), or 
+     a set value to avoid overflow.
+        x' = x - x.max(1)
+    """
+    if shift is None:
+        shift = x.max(1)
+
+    x2 = ts.add(x, -shift[:,None])
+    
+    tmp = ts.tensor.SparseTensor(
+        row=x2.storage.row(),
+        col=x2.storage.col(),
+        value=torch.exp(x2.storage.value()) / temperature,
+        sparse_sizes=x2.sizes()
+    )
+    return ts.add(x2, -torch.log(tmp.sum(1)[:,None]))
+
+
+def ts_setDiag_lowMem(x, values):
+    """
+    This method is better than x.set_diag(values) when
+     x already has non-sparse diagonal elements, or generally if
+     the non-sparse digaonal elements of x match up
+     1 to 1 with the elements in values.
+    """
+    vals = x.storage.value()
+    idx = x.storage.row() == x.storage.col()
+    
+    vals[idx] = values
+    
+    return ts.tensor.SparseTensor(
+        row=x.storage.row(),
+        col=x.storage.col(),
+        value=vals,
+        sparse_sizes=x.sizes()
+    )
+
 
 #########################
 # visualization helpers #

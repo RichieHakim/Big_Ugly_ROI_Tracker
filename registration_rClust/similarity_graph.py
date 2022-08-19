@@ -182,7 +182,7 @@ class ROI_graph:
 
         print('Computing pairwise similarity between ROIs...') if self._verbose else None
         for ii, block in tqdm(enumerate(self.blocks), total=len(self.blocks)):
-            # if ii < len(self.blocks) - 3:
+            # if ii < 58:
             #     continue
             idxROI_block = np.where(self.sf_cat[:, self.idxPixels_block[ii]].sum(1) > 0)[0]
             
@@ -193,7 +193,8 @@ class ROI_graph:
                 features_SWT=features_SWT[idxROI_block],
                 ROI_session_bool=ROI_session_bool[idxROI_block],
             )
-            s_block = torch.maximum(s_block, s_block.T)  # force symmetry
+            if s_block is None: # If there are no ROIs in this block, s_block will be None, so we should skip the rest of the loop
+                continue
             idx = np.meshgrid(idxROI_block, idxROI_block) # get ij indices for rois in this block for s_block
             s_tmp = copy.copy(s_empty) # preallocate a sparse matrix of the full size s matrix
             s_tmp[idx[0], idx[1]] = s_block # fil in the full size s matrix with the block s matrix
@@ -206,9 +207,10 @@ class ROI_graph:
 
             if d_block.shape[0] > 1: # if d_block.shape[0] is 1 or 0, then there aren't enough samples in the block to find clusters
                 cluster_idx_block__idxBlock, cluster_freq_block =  self._helper_compute_linkage_clusters(d_block.numpy()) # compute clusters for this block
-                cluster_idx_block = [idxROI_block[idx] for idx in cluster_idx_block__idxBlock] # convert from block indices to full indices
+                if cluster_idx_block__idxBlock is not None: ## if no clusters were found, cluster_idx_block__idxBlock will be None
+                    cluster_idx_block = [idxROI_block[idx] for idx in cluster_idx_block__idxBlock] # convert from block indices to full indices
 
-                cluster_idx_all += cluster_idx_block # accumulate the cluster indices (idx of rois in each cluster) for all blocks
+                    cluster_idx_all += cluster_idx_block # accumulate the cluster indices (idx of rois in each cluster) for all blocks
 
         ## remove duplicate clusters by hashing each cluster's indices and calling np.unique on the hashes
         print(f'Removing duplicate clusters...') if self._verbose else None
@@ -370,6 +372,9 @@ class ROI_graph:
                 The boolean matrix indicating which ROIs belong to which session.
                 shape (n_ROIs total, n_sessions)
         """
+        ## if there are no ROIs in the block
+        if spatialFootprints.shape[0] == 0:
+            return None
 
         sf = scipy.sparse.vstack(spatialFootprints)
         sf = sf.power(self._sf_maskPower)
@@ -391,7 +396,7 @@ class ROI_graph:
 
 
         s_sf = 1 - d_sf.toarray()
-        s_sf[s_sf < 0] = 0
+        s_sf[s_sf < 1e-5] = 0  ## Likely due to numerical errors, some values are < 0 and very small. Rectify to fix.
         s_sf[range(s_sf.shape[0]), range(s_sf.shape[0])] = 0
         s_sf = torch.as_tensor(s_sf, dtype=torch.float32)
 
@@ -409,6 +414,8 @@ class ROI_graph:
         s_sesh = torch.logical_not((session_bool @ session_bool.T).type(torch.bool))
 
         s_conj = s_sf * s_NN * s_SWT * s_sesh
+
+        s_conj = torch.maximum(s_conj, s_conj.T)  # force symmetry
 
         return s_conj
 
@@ -466,6 +473,9 @@ class ROI_graph:
             cluster_freq (np.ndarray):
                 The frequency of each cluster
         """
+        if cluster_bool.shape[0] == 0:
+            return None, None
+
         clusterHashes = np.concatenate([
             hash_matrix(batch) for batch in helpers.make_batches(cluster_bool, batch_size=self._batch_size_hashing, length=cluster_bool.shape[0])
         ], axis=0)
