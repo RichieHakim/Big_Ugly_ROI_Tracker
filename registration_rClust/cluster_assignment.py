@@ -49,21 +49,29 @@ class Cluster_Assigner:
         verbose=True,
     ):
         """
+        Initialize the cluster assignment class.
+
         Args:
             c (scipy.sparse.csr_matrix, dtype float):
-                The cluster similarity matrix.
+                'Cluster similarity' matrix.
+                Elements are pairwise similarities between clusters.
                 shape: (n_clusters, n_clusters)
             h (scipy.sparse.csr_matrix, dtype bool):
+                'multi Hot' boolean matrix.
                 The cluster membership matrix.
                 shape: (n_samples, n_clusters)
             w (torch.Tensor, dtype float):
-                The cluster score vector.
-                shape: (n_clusters)
+                'Weight' vector.
+                Elements are the scores of each cluster. Can be customized.
                 Weighs how much to value the inclusion of each cluster
                  relative to the total fracWeight_penalty.
+                shape: (n_clusters)
                 If None, the clusters are weighted equally.
             m_init (torch.Tensor, dtype float):
-                The initial cluster inclusion vector.
+                'initial Mask' vector.
+                This vector initializes the only optimized parameter.
+                The initial cluster inclusion vector. Masks which clusters
+                 are included in the prediction.
                 shape: (n_clusters)
                 If None, then vector is initialized as small random values.
             device (str):
@@ -126,13 +134,27 @@ class Cluster_Assigner:
                  convergence.
             verbose (bool):
                 Whether to print progress.
+
+        Attributes set:
+            self.c (torch_sparse.SparseTensor):
+                The cluster similarity matrix.
+            self.h (torch.SparseTensor):
+                The cluster membership matrix.
+            self.w (torch.SparseTensor):
+                The cluster weights vector.
+            self.m (torch.Tensor):
+                The cluster inclusion vector.
         """
 
-        self._n_samples = c.shape[0]
+        ## c.shape[0] == c.shape[1] == h.shape[0]
+        assert c.shape[0] == c.shape[1] == h.shape[0], 'RH ERROR: the following must be true:  c.shape[0] == c.shape[1] == h.shape[0], they should all be n_clusters'
+
         self._n_clusters = h.shape[1]
 
         self._DEVICE = device
 
+        ## c must be cast as a torch_sparse.SparseTensor because the masking 
+        ##  operation (c * m[None,:]) is not implemented in standard torch.sparse yet...
         c_tmp = helpers.scipy_sparse_to_torch_coo(c).coalesce().type(torch.float32)
         self.c = ts.SparseTensor(
             row=c_tmp.indices()[0], 
@@ -143,11 +165,12 @@ class Cluster_Assigner:
 
         self.h = helpers.scipy_sparse_to_torch_coo(h).coalesce().type(torch.float32).to(self._DEVICE)
 
+        ## w is converted to a square diagonal matrix so that h @ w masks the columns of h (torch.sparse doesn't support h * w[None,:] yet...)
         w_tmp = scipy.sparse.lil_matrix((self._n_clusters, self._n_clusters))
         w_tmp[range(self._n_clusters), range(self._n_clusters)] = (w / w.max()) if w is not None else 1
         self.w = helpers.scipy_sparse_to_torch_coo(w_tmp).coalesce().type(torch.float32).to(self._DEVICE)
-        # self.w = (torch.eye(len(w)) * (w / w.max())[None,:]).to_sparse().type(torch.float32).to(self._DEVICE) if w is not None else torch.eye(self._n_samples).type(torch.float32).to_sparse().to(self._DEVICE)
 
+        ## optimization seems to proceed best when values initialize as small random values. New ideas welcome here.
         self.m = m_init.to(self._DEVICE) if m_init is not None else (torch.ones(self._n_clusters)*0.1 + torch.rand(self._n_clusters)*0.05).type(torch.float32).to(self._DEVICE)
         self.m.requires_grad=True
 
@@ -161,7 +184,6 @@ class Cluster_Assigner:
 
         self._dmCEL = self._DoubleMasked_CEL(
             c=self.c,
-            n_clusters=self._n_clusters,
             device=self._DEVICE,
             temp=dmCEL_temp,
             sig_slope=dmCEL_sigSlope,
@@ -199,8 +221,8 @@ class Cluster_Assigner:
             'L_maskL1': [],
         }
 
-        # gc.collect()
-        # torch.cuda.empty_cache()
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def fit(
         self, 
@@ -216,13 +238,10 @@ class Cluster_Assigner:
 
             L_cs = self._dmCEL(c=self.c, m=self.m) * self._dmCEL_penalty  ## 'cluster similarity loss'
             L_sampleWeight = self._loss_sampleWeight(self.h, self.activate_m()) * self._sampleWeight_penalty
-            # L_sampleWeight = self._loss_sampleWeight(self.h, self.m) * self._sampleWeight_penalty
             L_fracWeighted = self._loss_fracWeighted(self.activate_m()) * self._fracWeight_penalty
             L_maskL1 = torch.sum(torch.abs(self.activate_m())) * self._maskL1_penalty
 
             self._loss = L_cs + L_fracWeighted + L_sampleWeight + L_maskL1
-            # self._loss = L_fracWeighted + L_sampleWeight + L_maskL1
-            # self._loss = L_cs 
 
             if torch.isnan(self._loss):
                 print(f'STOPPING EARLY: loss is NaN. iter: {self._i_iter}  loss: {self._loss.item():.4f}  L_cs: {L_cs.item():.4f}  L_fracWeighted: {L_fracWeighted.item():.4f}  L_sampleWeight: {L_sampleWeight.item():.4f}  L_maskL1: {L_maskL1.item():.4f}')
@@ -248,7 +267,6 @@ class Cluster_Assigner:
 
             if verbose and self._i_iter % verbose_interval == 0:
                 print(f'iter: {self._i_iter}:  loss_total: {self._loss.item():.4f}  lr: {self._scheduler.get_last_lr()[0]:.5f}   loss_cs: {L_cs.item():.4f}  loss_fracWeighted: {L_fracWeighted.item():.4f}  loss_sampleWeight: {L_sampleWeight.item():.4f}  loss_maskL1: {L_maskL1.item():.4f}  diff_loss: {diff_window_convergence:.4f}  loss_smooth: {loss_smooth:.4f}')
-                # print(torch.isnan(self.m).sum())
             self._i_iter += 1
 
 
@@ -263,13 +281,11 @@ class Cluster_Assigner:
         n_multiples = (h_ts_bool.sum(1) > 1).sum()
         print(f'WARNING: {n_multiples} samples are matched with multiple clusters. Consider increasing the sample_weight_penalty during training.') if n_multiples > 0 else None
         h_preds = (h_ts_bool * (torch.arange(self.m_bool.sum(), device=self._DEVICE)[None,:]+1)).detach().cpu()
-        # h_preds[h_preds==0] = -1
 
         if h_preds.numel() == 0:
             print(f'WARNING: No predictions made.  m_threshold: {m_threshold}')
             return None, None
 
-        # preds = torch.max(h_preds, dim=1)[0]
         preds = h_preds.max(dim=1) - 1
         preds[torch.isinf(preds)] = -1
         
@@ -289,61 +305,71 @@ class Cluster_Assigner:
 
 
     class _DoubleMasked_CEL:
+        """
+        'Double Masked Cross-Entropy Loss' Class. Derived here.
+        Gives a loss value for how well-separated a set of clusters are.
+        Input is a cluster similarity matrix (c, shape: (n_clusters, n_clusters)),
+         and a mask vector (m, shape: (n_clusters,)).
+        Output is a loss value.
+        Operation proceeds as follows:
+        1. Pass mask vector through activation function. ma=sigmoid(m)
+        2. Compute the loss value for each cluster.
+            a. Mask the columns of 'c' with 'ma': cm=c*ma[None,:]
+            b. Replace the diagonal values of 'cm' with the diagonal values of 'c'
+            c. Compute the cross-entropy loss value for each cluster. lv=CEL(cm, labels=arange(n_clusters))
+        3. Weight the loss values by the mask vector and do a mean reduction. l=lv@ma
+        
+        RH 2022
+        """
         def __init__(
             self,
             c,
-            n_clusters,
             device='cpu',
             temp=1,
             sig_slope=5,
             sig_center=0.5,
-        ):
-            # self.labels = torch.arange(n_clusters, device=device, dtype=torch.int64)
-            # self.CEL = torch.nn.CrossEntropyLoss(reduction='none')
-            # self.CEL = lambda x : helpers.diag_sparse(torch.sparse.log_softmax(x, dim=1).coalesce())
-            # self.CEL = lambda x : -helpers.diag_sparse(torch.sparse.log_softmax(x/self.temp, dim=1).coalesce())
-            # self.CEL = lambda x : -helpers.diag_sparse(helpers.ts_logSoftmax(x, temperature=self.temp).coalesce())
-            self.CEL = lambda x :  - helpers.ts_logSoftmax(x, temperature=self.temp, shift=None).get_diag()
+        ):    
+            """
+            Initializes the 'Double Masked Cross-Entropy Loss' Class.
+
+            Args:
+                c (torch_sparse.SparseTensor):
+                    Cluster similarity matrix (c, shape: (n_clusters, n_clusters)).
+                device (str):
+                    Device to use for the computation.
+                temp (float):
+                    Temperature parameter for the softmax activation function.
+                    Lower values results in more non-convexity but stronger convergence (steeper gradient).
+                sig_slope (float):
+                    Slope of the sigmoid activation function of the mask vector.
+                sig_center (float):
+                    Center of the sigmoid activation function of the mask vector.
+            """
+            self._n_clusters = c.shape[0]
+
             self.temp = temp
+            
+            ## Cross-Entropy Loss: since we are trying to maximize the diagonal, CEL can be simplified as:
+            ##  -diag(log_softmax(x))
+            self.CEL = lambda x :  - helpers.ts_logSoftmax(x, temperature=self.temp, shift=None).get_diag() 
+            
+            ## We will be activating the optimized 'm' parameter to scale it between 0 and 1.
             self.activation = self.make_sigmoid_function(sig_slope, sig_center)
+
             self.device=device
             
-            # self.w = w
-            
-            # self.idx_diag = torch.arange(n_clusters, device=device, dtype=torch.int64)
-
-            # self.m_eye = torch.sparse_coo_tensor(
-            #     indices=torch.vstack((torch.arange(n_clusters), torch.arange(n_clusters))).to(device),
-            #     values=torch.ones(n_clusters).to(device),
-            #     size=(n_clusters, n_clusters)
-            # ).coalesce()
-            # self.m_eye = torch.eye(n_clusters, device=device).to(device)
-
-            self.worst_case_loss = self.CEL(
-                # (torch.logical_not(torch.eye(n_clusters, device=device)) + torch.eye(n_clusters, device=device)*c.diag()[None,:]).type(torch.float32) / self.temp,
-                # c / self.temp,
-                # self.labels
-                c,
-            )
+            ## We define a best and worst case CEL value so that we can scale the loss to be invariant to
+            ##  things like temperature and number of clusters.
+            self.worst_case_loss = self.CEL(c)
             self.best_case_loss = self.CEL(
-                # torch.sparse_coo_tensor(
-                #     indices=torch.vstack((torch.arange(n_clusters), torch.arange(n_clusters))).to(device),
-                #     # values=torch_helpers.diag_sparse(c), 
-                #     values=c.get_diag().type(torch.float32), 
-                #     size=(n_clusters, n_clusters)
-                # )
                 ts.tensor.SparseTensor(
-                    row=torch.arange(n_clusters, device=device, dtype=torch.int64),
-                    col=torch.arange(n_clusters, device=device, dtype=torch.int64),
+                    row=torch.arange(self._n_clusters, device=device, dtype=torch.int64),
+                    col=torch.arange(self._n_clusters, device=device, dtype=torch.int64),
                     value=c.get_diag().type(torch.float32),
-                    sparse_sizes=(n_clusters, n_clusters),
-                    # indices=torch.vstack((torch.arange(n_clusters), torch.arange(n_clusters))).to(device),
-                    # # values=torch_helpers.diag_sparse(c), 
-                    # values=c.get_diag().type(torch.float32), 
-                    # size=(n_clusters, n_clusters)
+                    sparse_sizes=(self._n_clusters, self._n_clusters),
                 )
-            )
-            self.worst_minus_best = self.worst_case_loss - self.best_case_loss  + 1e-8
+            ) ## the best case is just a diagonal matrix with the same values as the input matrix.
+            self.worst_minus_best = self.worst_case_loss - self.best_case_loss  + 1e-8  ## add a small amount for numerical stability.
 
         def make_sigmoid_function(
             self,
@@ -353,46 +379,47 @@ class Cluster_Assigner:
             return lambda x : 1 / (1 + torch.exp(-sig_slope*(x-sig_center)))
             
         def __call__(self, c, m):
-            mp = self.activation(m)  ## constrain to be 0-1
+            ma = self.activation(m)  ## 'activated mask'. Constrained to be 0-1
 
-            ###### cm = c * mp[None,:]  ## 'c masked'. Mask only applied to columns.
-            # cm = c @ torch.sparse_coo_tensor(
-            #     indices=torch.vstack((torch.arange(c.shape[0]), torch.arange(c.shape[0]))).to(self.device),
-            #     values=mp,
-            #     size=(c.shape[0], c.shape[0])
-            # )  ## 'c masked'. Mask only applied to columns.
-            # cm = c @ (self.m_eye*mp[None,:])  ## 'c masked'. Mask only applied to columns.
-            # cm = c * m[None,:]
-            # cm = c
-            ###### cm[self.idx_diag, self.idx_diag] = c.diagonal()
-            # cm = c * mp.sum()
+            ## Below gives us our loss for each column, which will later be scaled by 'ma' 
+            ##  to get the final loss.
+            ## The idea is that 'ma' masks out columns in 'c' (while ignoring elements along
+            ##  the diagonal) in order to maximize the diagonal elements relative to all other
+            ##  elements in the row. Optimization should result in 'selection' of clusters by
+            ##  masking out poor clusters that are too similar to good clusters.
+            lv = self.CEL(
+                helpers.ts_setDiag_lowMem(
+                    c * ma[None,:],
+                     c.get_diag()
+                )
+            ) ## 'loss vector'
 
-            # cm = c * mp[None,:]
-            # # cm = cm.set_diag(c.get_diag())
-            # cm = helpers.ts_setDiag_lowMem(cm, c.get_diag())
-            # lv = self.CEL(cm)
-
-            lv = self.CEL(helpers.ts_setDiag_lowMem(c * mp[None,:], c.get_diag()))
-
-            # lv = self.CEL(
-            #     cm/self.temp, 
-            #     # self.labels
-            #     )  ## 'loss vector' showing loss of each row (each cluster)
-            # print(self.worst_minus_best)
-
-            lv_norm = (lv - self.best_case_loss) / self.worst_minus_best
-
-            # print(lv_norm @ mp)
-            # self.test = mp
+            lv_norm = (lv - self.best_case_loss) / self.worst_minus_best  ## scale the loss of each cluster by the best and worst case possibilities.
             
-            l = (lv_norm @ mp) / mp.sum()  ## 'loss'
-            
-            # l = ((lv/self.w) @ mp) / mp.sum()  ## 'loss'
+            ## weight the loss of each clusters by the activated masking parameter 'ma'
+            l = (lv_norm @ ma) / ma.sum()  ## 'loss'
 
             return l
-            # return 1
+
 
     class _Loss_fracWeighted:
+        """
+        'Fraction Weighted Loss' Class. Derived here.
+        Gives a loss value for the fraction of clusters that are highly weighted
+         scaled by how valuable each cluster is.
+        Inputs are the cluster membership ('multiHot') matrix (h, shape: (n_clusters, n_samples)),
+         and the cluster scores ('weighting') vector (w, shape: (n_clusters,)).
+        Output is a loss value.
+        Operation proceeds as follows:
+        0. In initialization, weight the h matrix by the w vector. hw=h*w[None,:]
+        1. Mask and sum-reduce the hw matrix with the mask vector (dot product) to get the
+         score-weighted penalty for excluding that cluster. hwm=hw@m (hwm shape: n_samples)
+        2. Pass hwm through an activation function. hwma=sigmoid(hwm)
+        3. Take mean squared error with respect to the goal number of samples positively
+         weighted. l=(hwma-g)^2
+
+        RH 2022
+        """
         def __init__(
             self,
             h,
