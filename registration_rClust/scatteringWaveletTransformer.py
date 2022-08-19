@@ -11,7 +11,8 @@ class SWT:
         self, 
         kwargs_Scattering2D={'J': 2, 'L': 8}, 
         image_shape=(36,36), 
-        device='cpu'
+        device='cpu',
+        verbose=True,
     ):
         """
         Initialize the class.
@@ -26,8 +27,10 @@ class SWT:
             device (str):
                 The device to use for the transformation.
         """
-        self.device = device
+        self._verbose = verbose
+        self._device = device
         self.swt = Scattering2D(shape=image_shape, **kwargs_Scattering2D).to(device)
+        print('SWT initialized') if self._verbose else None
 
     def transform(self, ROI_images):
         """
@@ -45,7 +48,9 @@ class SWT:
                 The transformed ROI images.
                 shape: (n_ROIs, latent_size)
         """
-        sfs = torch.as_tensor(np.ascontiguousarray(ROI_images[None,...]), device=self.device, dtype=torch.float32)
+        print('Starting: SWT transform on ROIs') if self._verbose else None
+        sfs = torch.as_tensor(np.ascontiguousarray(ROI_images[None,...]), device=self._device, dtype=torch.float32)
         self.latents = self.swt(sfs[None,...]).squeeze().cpu()
         self.latents = self.latents.reshape(self.latents.shape[0], -1)
+        print('Completed: SWT transform on ROIs') if self._verbose else None
         return self.latents

@@ -215,41 +215,41 @@ class Cluster_Assigner:
             self._optimizer.zero_grad()
 
             L_cs = self._dmCEL(c=self.c, m=self.m) * self._dmCEL_penalty  ## 'cluster similarity loss'
-            # L_sampleWeight = self._loss_sampleWeight(self.h, self.activate_m()) * self._sampleWeight_penalty
-            # # L_sampleWeight = self._loss_sampleWeight(self.h, self.m) * self._sampleWeight_penalty
-            # L_fracWeighted = self._loss_fracWeighted(self.activate_m()) * self._fracWeight_penalty
-            # L_maskL1 = torch.sum(torch.abs(self.activate_m())) * self._maskL1_penalty
+            L_sampleWeight = self._loss_sampleWeight(self.h, self.activate_m()) * self._sampleWeight_penalty
+            # L_sampleWeight = self._loss_sampleWeight(self.h, self.m) * self._sampleWeight_penalty
+            L_fracWeighted = self._loss_fracWeighted(self.activate_m()) * self._fracWeight_penalty
+            L_maskL1 = torch.sum(torch.abs(self.activate_m())) * self._maskL1_penalty
 
-            # self._loss = L_cs + L_fracWeighted + L_sampleWeight + L_maskL1
-            # # self._loss = L_fracWeighted + L_sampleWeight + L_maskL1
-            # # self._loss = L_cs 
+            self._loss = L_cs + L_fracWeighted + L_sampleWeight + L_maskL1
+            # self._loss = L_fracWeighted + L_sampleWeight + L_maskL1
+            # self._loss = L_cs 
 
-            # if torch.isnan(self._loss):
-            #     print(f'STOPPING EARLY: loss is NaN. iter: {self._i_iter}  loss: {self._loss.item():.4f}  L_cs: {L_cs.item():.4f}  L_fracWeighted: {L_fracWeighted.item():.4f}  L_sampleWeight: {L_sampleWeight.item():.4f}  L_maskL1: {L_maskL1.item():.4f}')
-            #     break
+            if torch.isnan(self._loss):
+                print(f'STOPPING EARLY: loss is NaN. iter: {self._i_iter}  loss: {self._loss.item():.4f}  L_cs: {L_cs.item():.4f}  L_fracWeighted: {L_fracWeighted.item():.4f}  L_sampleWeight: {L_sampleWeight.item():.4f}  L_maskL1: {L_maskL1.item():.4f}')
+                break
 
-            # self._loss.backward()
-            # self._optimizer.step()
-            # self._scheduler.step()
+            self._loss.backward()
+            self._optimizer.step()
+            self._scheduler.step()
 
-            # self.m.data = torch.maximum(self.m.data , torch.as_tensor(-14, device=self._DEVICE))
+            self.m.data = torch.maximum(self.m.data , torch.as_tensor(-14, device=self._DEVICE))
 
-            # self.losses_logger['loss'].append(self._loss.item())
-            # self.losses_logger['L_cs'].append(L_cs.item())
-            # self.losses_logger['L_fracWeighted'].append(L_fracWeighted.item())
-            # self.losses_logger['L_sampleWeight'].append(L_sampleWeight.item())
-            # self.losses_logger['L_maskL1'].append(L_maskL1.item())
+            self.losses_logger['loss'].append(self._loss.item())
+            self.losses_logger['L_cs'].append(L_cs.item())
+            self.losses_logger['L_fracWeighted'].append(L_fracWeighted.item())
+            self.losses_logger['L_sampleWeight'].append(L_sampleWeight.item())
+            self.losses_logger['L_maskL1'].append(L_maskL1.item())
 
-            # if self._i_iter%self._freqCheck_convergence==0 and self._i_iter>self._window_convergence and self._i_iter>min_iter:
-            #     diff_window_convergence, loss_smooth, converged = self._convergence_checker(self.losses_logger['loss'])
-            #     if converged:
-            #         print(f"STOPPING: Convergence reached in {self._i_iter} iterations.  loss: {self.losses_logger['loss'][-1]:.4f}  loss_smooth: {loss_smooth:.4f}")
-            #         break
+            if self._i_iter%self._freqCheck_convergence==0 and self._i_iter>self._window_convergence and self._i_iter>min_iter:
+                diff_window_convergence, loss_smooth, converged = self._convergence_checker(self.losses_logger['loss'])
+                if converged:
+                    print(f"STOPPING: Convergence reached in {self._i_iter} iterations.  loss: {self.losses_logger['loss'][-1]:.4f}  loss_smooth: {loss_smooth:.4f}")
+                    break
 
-            # if verbose and self._i_iter % verbose_interval == 0:
-            #     print(f'iter: {self._i_iter}:  loss_total: {self._loss.item():.4f}  lr: {self._scheduler.get_last_lr()[0]:.5f}   loss_cs: {L_cs.item():.4f}  loss_fracWeighted: {L_fracWeighted.item():.4f}  loss_sampleWeight: {L_sampleWeight.item():.4f}  loss_maskL1: {L_maskL1.item():.4f}  diff_loss: {diff_window_convergence:.4f}  loss_smooth: {loss_smooth:.4f}')
-            #     # print(torch.isnan(self.m).sum())
-            # self._i_iter += 1
+            if verbose and self._i_iter % verbose_interval == 0:
+                print(f'iter: {self._i_iter}:  loss_total: {self._loss.item():.4f}  lr: {self._scheduler.get_last_lr()[0]:.5f}   loss_cs: {L_cs.item():.4f}  loss_fracWeighted: {L_fracWeighted.item():.4f}  loss_sampleWeight: {L_sampleWeight.item():.4f}  loss_maskL1: {L_maskL1.item():.4f}  diff_loss: {diff_window_convergence:.4f}  loss_smooth: {loss_smooth:.4f}')
+                # print(torch.isnan(self.m).sum())
+            self._i_iter += 1
 
 
     def predict(
