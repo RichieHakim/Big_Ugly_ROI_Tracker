@@ -85,6 +85,7 @@ class Cluster_Assigner:
             scheduler (torch.optim.lr_scheduler):
                 A torch learning rate scheduler.
             dmCEL_temp (float):
+                ===IMPORTANT HYPERPARAMETER===
                 The temperature used in the cross entropy loss of the
                  interaction matrix.
             dmCEL_sigSlope (float):
@@ -104,8 +105,10 @@ class Cluster_Assigner:
                  when samples are included more than once. 
                 Recommend keeping this around default values.
             sampleWeight_penalty (float):
+                ===IMPORTANT HYPERPARAMETER===
                 The penalty applied when samples are included more than once.
             fracWeighted_goalFrac (float):
+                ===IMPORTANT HYPERPARAMETER===
                 The goal fraction of samples to be included in the output.
                 Recommend keeping this to 1 for most applications.
             fracWeighted_sigSlope (float):
@@ -119,6 +122,7 @@ class Cluster_Assigner:
             fracWeight_penalty (float):
                 The penalty applied to the sample weights loss.
             maskL1_penalty (float):
+                ===IMPORTANT HYPERPARAMETER===
                 The penalty applied to the L1 norm of the mask.
                 Adjust this to reduce the probability of extracting clusters
                  with low scores.
@@ -221,6 +225,8 @@ class Cluster_Assigner:
             'L_maskL1': [],
         }
 
+        ## clean up. Some of the initialization steps generate intermediate tensors
+        ##  that are not needed long term.
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -231,17 +237,51 @@ class Cluster_Assigner:
         verbose=True, 
         verbose_interval=100
     ):
+        """
+        Fit the model.
+        This method can be interupted during a run and restarted without issues.
+
+        Uses the standard PyTorch gradient descent approach:
+            1. zero the parameter gradients (optimizer.zero_grad())
+            2. compute the loss (loss=...)
+            3. compute the gradients of the loss w.r.t. the parameters (loss.backward())
+            4. update the parameters (optimizer.step())
+
+        There are 4 components to the loss:
+            1. L_cs: Penalizes how similar the unmasked clusters are relative to each other.
+            2. L_fracWeighted: Penalizes how many samples are not assigned to a cluster.
+            3. L_sampleWeight: Penalizes samples that are assigned to multiple clusters.
+            4. L_maskL1: Penalizes using many (instead of few) clusters to mask the samples.
+
+        Issue handling things:
+            - clamping the values of m to > -14. This is to prevent a dead gradient on those
+             parameter values.
+            - checking if loss is NaN. If it is, the optimization is terminated before backward pass.
+
+        The convergence checker fits a line to the last self._window_convergence iterations of self.losses_logger
+         and checks if the slope of the line is less than self._tol_convergence.
+
+        Args:
+            min_iter (int): 
+                The minimum number of iterations to run.
+            max_iter (int): 
+                The maximum number of iterations to run.
+            verbose (bool): 
+                If True, print the loss every verbose_interval iterations.
+            verbose_interval (int): 
+                The interval at which to print the loss.
+        """
         loss_smooth = np.nan
         diff_window_convergence = np.nan
         while self._i_iter <= max_iter:
             self._optimizer.zero_grad()
 
             L_cs = self._dmCEL(c=self.c, m=self.m) * self._dmCEL_penalty  ## 'cluster similarity loss'
-            L_sampleWeight = self._loss_sampleWeight(self.h, self.activate_m()) * self._sampleWeight_penalty
-            L_fracWeighted = self._loss_fracWeighted(self.activate_m()) * self._fracWeight_penalty
-            L_maskL1 = torch.sum(torch.abs(self.activate_m())) * self._maskL1_penalty
+            L_sampleWeight = self._loss_sampleWeight(self.h, self.activate_m()) * self._sampleWeight_penalty ## 'sample weight loss'
+            L_fracWeighted = self._loss_fracWeighted(self.activate_m()) * self._fracWeight_penalty ## 'fraction weighted loss'
+            L_maskL1 = torch.sum(torch.abs(self.activate_m())) * self._maskL1_penalty ## 'L1 on mask loss'
 
-            self._loss = L_cs + L_fracWeighted + L_sampleWeight + L_maskL1
+            self._loss = L_cs + L_fracWeighted + L_sampleWeight + L_maskL1 ## 'total loss'
 
             if torch.isnan(self._loss):
                 print(f'STOPPING EARLY: loss is NaN. iter: {self._i_iter}  loss: {self._loss.item():.4f}  L_cs: {L_cs.item():.4f}  L_fracWeighted: {L_fracWeighted.item():.4f}  L_sampleWeight: {L_sampleWeight.item():.4f}  L_maskL1: {L_maskL1.item():.4f}')
@@ -251,20 +291,23 @@ class Cluster_Assigner:
             self._optimizer.step()
             self._scheduler.step()
 
-            self.m.data = torch.maximum(self.m.data , torch.as_tensor(-14, device=self._DEVICE))
+            self.m.data = torch.maximum(self.m.data , torch.as_tensor(-14, device=self._DEVICE)) ## clamp m values to prevent zeroing out and a dead gradient
 
+            ## populate logger with values
             self.losses_logger['loss'].append(self._loss.item())
             self.losses_logger['L_cs'].append(L_cs.item())
             self.losses_logger['L_fracWeighted'].append(L_fracWeighted.item())
             self.losses_logger['L_sampleWeight'].append(L_sampleWeight.item())
             self.losses_logger['L_maskL1'].append(L_maskL1.item())
 
+            ## check for convergence
             if self._i_iter%self._freqCheck_convergence==0 and self._i_iter>self._window_convergence and self._i_iter>min_iter:
                 diff_window_convergence, loss_smooth, converged = self._convergence_checker(self.losses_logger['loss'])
                 if converged:
                     print(f"STOPPING: Convergence reached in {self._i_iter} iterations.  loss: {self.losses_logger['loss'][-1]:.4f}  loss_smooth: {loss_smooth:.4f}")
                     break
-
+            
+            ## print loss values
             if verbose and self._i_iter % verbose_interval == 0:
                 print(f'iter: {self._i_iter}:  loss_total: {self._loss.item():.4f}  lr: {self._scheduler.get_last_lr()[0]:.5f}   loss_cs: {L_cs.item():.4f}  loss_fracWeighted: {L_fracWeighted.item():.4f}  loss_sampleWeight: {L_sampleWeight.item():.4f}  loss_maskL1: {L_maskL1.item():.4f}  diff_loss: {diff_window_convergence:.4f}  loss_smooth: {loss_smooth:.4f}')
             self._i_iter += 1
@@ -274,6 +317,18 @@ class Cluster_Assigner:
         self,
         m_threshold=0.5
     ):   
+        """
+        Return predicted cluster assignments based on a threshold on the
+         activated 'm' vector.
+        It can be useful to first plot the activated 'm' vector to see the
+         distribution: self.plot_clusterWeights().
+        
+        Args:
+            m_threshold (float): 
+                Threshold on the activated 'm' vector.
+                Clusters with activated 'm' values above the threshold are
+                 assigned a cluster ID.
+        """
         h_ts = helpers.torch_to_torchSparse(self.h)
 
         self.m_bool = (self.activate_m() > m_threshold).squeeze().cpu()
@@ -301,6 +356,10 @@ class Cluster_Assigner:
         return self.preds, self.confidence, self.scores_samples, self.m_bool
 
     def activate_m(self):
+        """
+        Pass the 'm' ('masking', the only optimized parameter) through the
+         activation function and return it.
+        """
         return self._dmCEL.activation(self.m)
 
 
@@ -468,17 +527,36 @@ class Cluster_Assigner:
             return (self.activate_sampleWeights(self.generate_sampleWeights(h, m))).mean()
 
     class _Convergence_checker:
+        """
+        'Convergence Checker' Class.
+        Checks for convergence of the optimization. Uses Ordinary Least Squares (OLS) to 
+         fit a line to the last 'window_convergence' number of iterations.
+        """
         def __init__(
             self,
             tol_convergence=1e-2,
             window_convergence=100,
         ):
+            """
+            Initialize the convergence checker.
+            
+            Args:
+                tol_convergence (float): 
+                    Tolerance for convergence.
+                    Corresponds to the slope of the line that is fit.
+                window_convergence (int):
+                    Number of iterations to use for fitting the line.
+            """
             self.window_convergence = window_convergence
             self.tol_convergence = tol_convergence
 
             self.line_regressor = torch.cat((torch.linspace(0,1,window_convergence)[:,None], torch.ones((window_convergence,1))), dim=1)
 
         def OLS(self, y):
+            """
+            Ordinary least squares.
+            Fits a line to y.
+            """
             X = self.line_regressor
             theta = torch.inverse(X.T @ X) @ X.T @ y
             y_rec = X @ theta
@@ -491,6 +569,23 @@ class Cluster_Assigner:
             self,
             loss_history,
         ):
+            """
+            Forward pass of the convergence checker.
+            Checks if the last 'window_convergence' number of iterations are
+             within 'tol_convergence' of the line fit.
+
+            Args:
+                loss_history (list):
+                    List of loss values for the last 'window_convergence' number of iterations.
+
+            Returns:
+                diff_window_convergence (float):
+                    Difference of the fit line over the range of 'window_convergence'.
+                loss_smooth (float):
+                    The mean loss over 'window_convergence'.
+                converged (bool):
+                    True if the 'diff_window_convergence' is less than 'tol_convergence'.
+            """
             loss_window = torch.as_tensor(loss_history[-self.window_convergence:], device='cpu', dtype=torch.float32)
             theta, y_rec, bias = self.OLS(y=loss_window)
 
