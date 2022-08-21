@@ -55,7 +55,7 @@ class Data_suite2p:
                 List of imported files. Type depends on sf_type.
         """
 
-        print(f"Starting: Importing spatial footprints from stat files") if self._verbose else None
+        print(f"Starting: Importing spatial footprints fromstat files") if self._verbose else None
 
         self.statFiles = [np.load(path, allow_pickle=True) for path in self.paths_stat]
 

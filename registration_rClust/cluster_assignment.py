@@ -36,7 +36,7 @@ class Cluster_Assigner:
         dmCEL_sigSlope=2,
         dmCEL_sigCenter=0.5,
         dmCEL_penalty=1,
-        sampleWeight_softplusKwargs={'beta': 500, 'threshold': 50},
+        sampleWeight_softplusKwargs={'beta': 200, 'threshold': 50},
         sampleWeight_penalty=1e1,
         fracWeighted_goalFrac=1.0,
         fracWeighted_sigSlope=2,
