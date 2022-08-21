@@ -150,8 +150,8 @@ class Cluster_Assigner:
                 The cluster inclusion vector.
         """
 
-        ## c.shape[0] == c.shape[1] == h.shape[0]
-        assert c.shape[0] == c.shape[1] == h.shape[0], 'RH ERROR: the following must be true:  c.shape[0] == c.shape[1] == h.shape[0], they should all be n_clusters'
+        ## c.shape[0] == c.shape[1] == h.shape[1]
+        assert c.shape[0] == c.shape[1] == h.shape[1], 'RH ERROR: the following must be true:  c.shape[0] == c.shape[1] == h.shape[1], they should all be n_clusters'
 
         self._n_clusters = h.shape[1]
 
