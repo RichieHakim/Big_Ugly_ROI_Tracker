@@ -404,7 +404,7 @@ class Cluster_Assigner:
                 sig_center (float):
                     Center of the sigmoid activation function of the mask vector.
             """
-            self._n_clusters = c.shape[0]
+            self._n_clusters = c.sizes()[0]
 
             self.temp = temp
             
